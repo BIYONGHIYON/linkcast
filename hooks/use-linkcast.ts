@@ -31,6 +31,8 @@ const rtcConfiguration: RTCConfiguration = {
   bundlePolicy: 'max-bundle',
 };
 
+const SIGNALING_RETRY_ERROR = '연결 서버에 닿지 못했어요. 다시 연결하고 있습니다.';
+
 function randomId() {
   return crypto.randomUUID().replaceAll('-', '');
 }
@@ -66,6 +68,7 @@ export function useLinkcast() {
   const lastSignalIdRef = useRef(0);
   const pollingRef = useRef<number | null>(null);
   const heartbeatRef = useRef<number | null>(null);
+  const pollingFailuresRef = useRef(0);
   const peerConnectionsRef = useRef(new Map<string, RTCPeerConnection>());
   const candidateQueuesRef = useRef(new Map<string, RTCIceCandidateInit[]>());
 
@@ -219,6 +222,7 @@ export function useLinkcast() {
 
   const startLoops = useCallback(() => {
     stopLoops();
+    pollingFailuresRef.current = 0;
     const poll = async () => {
       if (!roomIdRef.current || !peerIdRef.current) return;
       try {
@@ -232,8 +236,11 @@ export function useLinkcast() {
           lastSignalIdRef.current = Math.max(lastSignalIdRef.current, signal.id);
           await handleSignal(signal);
         }
+        pollingFailuresRef.current = 0;
+        setError((current) => (current === SIGNALING_RETRY_ERROR ? '' : current));
       } catch {
-        setError('연결 서버에 닿지 못했어요. 다시 연결하고 있습니다.');
+        pollingFailuresRef.current += 1;
+        if (pollingFailuresRef.current >= 8) setError(SIGNALING_RETRY_ERROR);
       }
     };
     void poll();
