@@ -5,7 +5,7 @@ import { defineConfig } from 'vite';
 import hostingConfig from './.openai/hosting.json';
 
 const SITE_CREATOR_PLACEHOLDER_DATABASE_ID =
-  '00000000-0000-4000-8000-000000000000';
+  'c7c644e2-d84d-434e-bfdd-41d196f474d7';
 
 const { d1, r2 } = hostingConfig;
 
@@ -19,7 +19,7 @@ const localBindingConfig = {
     ? [
         {
           binding: d1,
-          database_name: 'site-creator-d1',
+          database_name: 'linkcast-db',
           database_id: SITE_CREATOR_PLACEHOLDER_DATABASE_ID,
         },
       ]
