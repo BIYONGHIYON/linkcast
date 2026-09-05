@@ -14,6 +14,7 @@ import {
   Users,
   Video,
   Volume2,
+  VolumeX,
 } from 'lucide-react';
 
 import { Button } from '@/components/ui/button';
@@ -74,7 +75,9 @@ function statusLabel(status: ReturnType<typeof useLinkcast>['status']) {
 export default function Home() {
   const previewVideoRef = useRef<HTMLVideoElement>(null);
   const viewerVideoRef = useRef<HTMLVideoElement>(null);
+  const hostStageRef = useRef<HTMLElement>(null);
   const viewerStageRef = useRef<HTMLElement>(null);
+  const hostControlsTimerRef = useRef<number | null>(null);
   const viewerControlsTimerRef = useRef<number | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
   const autoJoinRef = useRef('');
@@ -88,7 +91,10 @@ export default function Home() {
   const [joinValue, setJoinValue] = useState('');
   const [copied, setCopied] = useState(false);
   const [captureError, setCaptureError] = useState('');
+  const [hostAudioEnabled, setHostAudioEnabled] = useState(true);
   const [playbackBlocked, setPlaybackBlocked] = useState(false);
+  const [isHostFullscreen, setIsHostFullscreen] = useState(false);
+  const [showHostControls, setShowHostControls] = useState(true);
   const [isViewerFullscreen, setIsViewerFullscreen] = useState(false);
   const [showViewerControls, setShowViewerControls] = useState(true);
 
@@ -114,6 +120,8 @@ export default function Home() {
     streamRef.current = null;
     if (previewVideoRef.current) previewVideoRef.current.srcObject = null;
     setIsPreviewing(false);
+    setHostAudioEnabled(false);
+    setShowHostControls(true);
     setCaptureInfo({});
   }, [leave]);
 
@@ -159,7 +167,15 @@ export default function Home() {
         streamRef.current = stream;
         if (previewVideoRef.current) {
           previewVideoRef.current.srcObject = stream;
-          await previewVideoRef.current.play();
+          previewVideoRef.current.muted = false;
+          try {
+            await previewVideoRef.current.play();
+            setHostAudioEnabled(true);
+          } catch {
+            previewVideoRef.current.muted = true;
+            setHostAudioEnabled(false);
+            await previewVideoRef.current.play();
+          }
         }
         const videoSettings = stream.getVideoTracks()[0]?.getSettings();
         const audioSettings = stream.getAudioTracks()[0]?.getSettings();
@@ -237,12 +253,56 @@ export default function Home() {
 
   const changeMode = (nextMode: 'host' | 'viewer') => {
     if (nextMode === mode) return;
+    if (document.fullscreenElement) void document.exitFullscreen();
     void leave();
     setMode(nextMode);
     setJoinValue('');
+    setShowHostControls(true);
+    setShowViewerControls(true);
     setPlaybackBlocked(false);
     window.history.replaceState(null, '', '/');
   };
+
+  const toggleHostAudio = useCallback(async () => {
+    const video = previewVideoRef.current;
+    if (!video) return;
+    if (hostAudioEnabled) {
+      video.muted = true;
+      setHostAudioEnabled(false);
+      return;
+    }
+    video.muted = false;
+    try {
+      await video.play();
+      setHostAudioEnabled(true);
+    } catch {
+      video.muted = true;
+      setHostAudioEnabled(false);
+    }
+  }, [hostAudioEnabled]);
+
+  const toggleHostFullscreen = useCallback(async () => {
+    if (!hostStageRef.current) return;
+    try {
+      if (document.fullscreenElement) {
+        await document.exitFullscreen();
+      } else {
+        setShowHostControls(false);
+        await hostStageRef.current.requestFullscreen();
+      }
+    } catch {
+      setIsHostFullscreen(false);
+      setShowHostControls(true);
+    }
+  }, []);
+
+  const revealHostControls = useCallback(() => {
+    setShowHostControls(true);
+    if (hostControlsTimerRef.current) window.clearTimeout(hostControlsTimerRef.current);
+    if (isHostFullscreen) {
+      hostControlsTimerRef.current = window.setTimeout(() => setShowHostControls(false), 3200);
+    }
+  }, [isHostFullscreen]);
 
   const toggleViewerFullscreen = useCallback(async () => {
     if (!viewerStageRef.current) return;
@@ -269,14 +329,19 @@ export default function Home() {
 
   useEffect(() => {
     const handleFullscreenChange = () => {
-      const fullscreen = document.fullscreenElement === viewerStageRef.current;
-      setIsViewerFullscreen(fullscreen);
-      setShowViewerControls(!fullscreen);
+      const hostFullscreen = document.fullscreenElement === hostStageRef.current;
+      const viewerFullscreen = document.fullscreenElement === viewerStageRef.current;
+      setIsHostFullscreen(hostFullscreen);
+      setIsViewerFullscreen(viewerFullscreen);
+      setShowHostControls(!hostFullscreen);
+      setShowViewerControls(!viewerFullscreen);
+      if (hostControlsTimerRef.current) window.clearTimeout(hostControlsTimerRef.current);
       if (viewerControlsTimerRef.current) window.clearTimeout(viewerControlsTimerRef.current);
     };
     document.addEventListener('fullscreenchange', handleFullscreenChange);
     return () => {
       document.removeEventListener('fullscreenchange', handleFullscreenChange);
+      if (hostControlsTimerRef.current) window.clearTimeout(hostControlsTimerRef.current);
       if (viewerControlsTimerRef.current) window.clearTimeout(viewerControlsTimerRef.current);
     };
   }, []);
@@ -375,8 +440,10 @@ export default function Home() {
 
           <TabsContent value="host">
             <div className="grid gap-5 lg:grid-cols-[minmax(0,1fr)_340px]">
-              <section className="relative aspect-video min-h-[280px] overflow-hidden rounded-[28px] bg-[#0b0d0f] shadow-[0_24px_80px_rgba(8,11,14,0.16)]">
-                <video ref={previewVideoRef} muted playsInline className={`h-full w-full object-contain transition-opacity duration-300 ${isPreviewing ? 'opacity-100' : 'opacity-0'}`} />
+              <section ref={hostStageRef} onPointerDown={revealHostControls} className={`group relative overflow-hidden bg-[#0b0d0f] shadow-[0_24px_80px_rgba(8,11,14,0.16)] ${isHostFullscreen ? 'h-dvh w-screen rounded-none' : 'aspect-video min-h-[280px] rounded-[28px]'}`}>
+                <video ref={previewVideoRef} muted={!hostAudioEnabled} playsInline onDoubleClick={() => void toggleHostFullscreen()} className={`h-full w-full object-contain transition-opacity duration-300 ${isPreviewing ? 'opacity-100' : 'opacity-0'} ${isPreviewing ? 'cursor-zoom-in' : ''}`}>
+                  <track kind="captions" srcLang="ko" label="한국어" src="/captions-empty.vtt" />
+                </video>
 
                 {!isPreviewing && (
                   <div className="absolute inset-0 grid place-items-center px-6 text-center">
@@ -391,17 +458,28 @@ export default function Home() {
                   </div>
                 )}
 
-                <div className="pointer-events-none absolute inset-x-0 top-0 flex items-center justify-between p-4 sm:p-5">
-                  <span className="rounded-full border border-white/10 bg-black/35 px-3 py-1.5 text-xs font-medium text-white/80 backdrop-blur-md">
-                    {activeRoom ? 'ON AIR' : isPreviewing ? 'PREVIEW' : 'NO SIGNAL'}
-                  </span>
-                  {isPreviewing && (
-                    <span className="flex items-center gap-2 rounded-full border border-white/10 bg-black/35 px-3 py-1.5 text-xs font-medium text-white/80 backdrop-blur-md">
-                      <span className={`size-1.5 rounded-full ${activeRoom ? 'animate-pulse bg-red-500' : 'bg-[#58d68d]'}`} />
-                      {resolution} · {frameRate}
+                {(!isHostFullscreen || showHostControls) && (
+                  <div className="absolute inset-x-0 top-0 flex items-center justify-between p-4 sm:p-5">
+                    <span className="rounded-full border border-white/10 bg-black/35 px-3 py-1.5 text-xs font-medium text-white/80 backdrop-blur-md">
+                      {activeRoom ? 'ON AIR' : isPreviewing ? 'PREVIEW' : 'NO SIGNAL'}
                     </span>
-                  )}
-                </div>
+                    <div className="flex items-center gap-2">
+                      {isPreviewing && (
+                        <>
+                          <span className="rounded-full border border-white/10 bg-black/35 px-3 py-1.5 text-xs font-medium text-white/80 backdrop-blur-md">
+                            {resolution} · {frameRate}
+                          </span>
+                          <Button variant="ghost" size="icon" onClick={() => void toggleHostAudio()} aria-label={hostAudioEnabled ? '송출자 소리 끄기' : '송출자 소리 켜기'} className="rounded-full border border-white/10 bg-black/35 text-white/80 hover:bg-black/55 hover:text-white">
+                            {hostAudioEnabled ? <Volume2 /> : <VolumeX />}
+                          </Button>
+                          <Button variant="ghost" size="icon" onClick={() => void toggleHostFullscreen()} aria-label={isHostFullscreen ? '전체화면 종료' : '전체화면 보기'} className="rounded-full border border-white/10 bg-black/35 text-white/80 hover:bg-black/55 hover:text-white">
+                            {isHostFullscreen ? <Minimize2 /> : <Maximize2 />}
+                          </Button>
+                        </>
+                      )}
+                    </div>
+                  </div>
+                )}
               </section>
 
               <aside className="flex flex-col rounded-[28px] border border-border bg-card p-5 sm:p-6">
