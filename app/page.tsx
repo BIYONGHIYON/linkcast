@@ -93,6 +93,7 @@ export default function Home() {
   const [captureError, setCaptureError] = useState('');
   const [hostAudioEnabled, setHostAudioEnabled] = useState(true);
   const [playbackBlocked, setPlaybackBlocked] = useState(false);
+  const [viewerVideoReady, setViewerVideoReady] = useState(false);
   const [isHostFullscreen, setIsHostFullscreen] = useState(false);
   const [showHostControls, setShowHostControls] = useState(true);
   const [isViewerFullscreen, setIsViewerFullscreen] = useState(false);
@@ -229,12 +230,37 @@ export default function Home() {
   }, [connectViewer, refreshDevices]);
 
   useEffect(() => {
-    if (!viewerVideoRef.current || !remoteStream) return;
-    viewerVideoRef.current.srcObject = remoteStream;
-    void viewerVideoRef.current
-      .play()
-      .then(() => setPlaybackBlocked(false))
-      .catch(() => setPlaybackBlocked(true));
+    const video = viewerVideoRef.current;
+    if (!video) return;
+
+    setViewerVideoReady(false);
+    setPlaybackBlocked(false);
+    video.onplaying = () => {
+      setViewerVideoReady(true);
+      setPlaybackBlocked(false);
+    };
+
+    if (!remoteStream) {
+      video.srcObject = null;
+      return;
+    }
+
+    const tryPlay = () => {
+      void video.play().catch((reason: unknown) => {
+        if (reason instanceof DOMException && reason.name === 'NotAllowedError') {
+          setPlaybackBlocked(true);
+        }
+      });
+    };
+
+    video.srcObject = remoteStream;
+    video.onloadedmetadata = tryPlay;
+    tryPlay();
+
+    return () => {
+      video.onplaying = null;
+      video.onloadedmetadata = null;
+    };
   }, [remoteStream]);
 
   const createShareLink = useCallback(async () => {
@@ -551,10 +577,10 @@ export default function Home() {
           <TabsContent value="viewer">
             {roomId && status !== 'not-found' && status !== 'full' && status !== 'failed' ? (
               <section ref={viewerStageRef} onPointerDown={revealViewerControls} className={`group relative overflow-hidden bg-[#0b0d0f] shadow-[0_24px_80px_rgba(8,11,14,0.16)] ${isViewerFullscreen ? 'h-dvh w-screen rounded-none' : 'aspect-video min-h-0 rounded-2xl sm:min-h-[300px] sm:rounded-[28px]'}`}>
-                <video ref={viewerVideoRef} autoPlay playsInline onDoubleClick={() => void toggleViewerFullscreen()} className={`h-full w-full object-contain transition-opacity duration-300 ${remoteStream ? 'opacity-100' : 'opacity-0'} ${remoteStream ? 'cursor-zoom-in' : ''}`}>
+                <video ref={viewerVideoRef} autoPlay playsInline onDoubleClick={() => void toggleViewerFullscreen()} className={`h-full w-full object-contain transition-opacity duration-300 ${remoteStream && viewerVideoReady ? 'opacity-100' : 'opacity-0'} ${remoteStream ? 'cursor-zoom-in' : ''}`}>
                   <track kind="captions" srcLang="ko" label="한국어" src="/captions-empty.vtt" />
                 </video>
-                {!remoteStream && (
+                {(!remoteStream || !viewerVideoReady) && (
                   <div className="absolute inset-0 grid place-items-center text-center text-white">
                     <div>
                       <span className="mx-auto mb-5 block size-3 animate-pulse rounded-full bg-[#58d68d] shadow-[0_0_0_8px_rgba(88,214,141,0.1)]" />

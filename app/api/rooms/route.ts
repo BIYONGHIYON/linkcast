@@ -2,6 +2,7 @@ import { getDatabase } from '@/db';
 
 const ROOM_TTL_SECONDS = 6 * 60 * 60;
 const PEER_TTL_SECONDS = 45;
+const MAX_VIEWERS = 2;
 const idPattern = /^[a-zA-Z0-9_-]{8,80}$/;
 
 type RoomPayload = {
@@ -77,32 +78,68 @@ export async function POST(request: Request) {
   }
 
   const room = await database
-    .prepare('SELECT host_id AS hostId FROM rooms WHERE id = ? AND expires_at > ?')
-    .bind(body.roomId, now)
+    .prepare(`
+      SELECT rooms.host_id AS hostId
+      FROM rooms
+      INNER JOIN peers ON peers.room_id = rooms.id AND peers.peer_id = rooms.host_id AND peers.role = 'host'
+      WHERE rooms.id = ? AND rooms.expires_at > ? AND peers.last_seen_at >= ?
+    `)
+    .bind(body.roomId, now, now - PEER_TTL_SECONDS)
     .first<{ hostId: string }>();
-  if (!room) return Response.json({ error: 'room_not_found' }, { status: 404 });
+  if (!room) return Response.json({ error: 'room_offline' }, { status: 404 });
 
-  const existing = await database
-    .prepare('SELECT 1 AS found FROM peers WHERE room_id = ? AND peer_id = ?')
-    .bind(body.roomId, body.peerId)
-    .first<{ found: number }>();
-  const viewers = await database
-    .prepare("SELECT COUNT(*) AS count FROM peers WHERE room_id = ? AND role = 'viewer' AND last_seen_at >= ?")
-    .bind(body.roomId, now - PEER_TTL_SECONDS)
-    .first<{ count: number }>();
+  // 슬롯 확인과 참가자 등록을 하나의 INSERT 조건으로 처리해, 동시에 참가해도
+  // 두 요청이 같은 빈 슬롯을 함께 통과하지 않도록 합니다.
+  const registration = await database
+    .prepare(`
+      INSERT INTO peers (room_id, peer_id, role, last_seen_at)
+      SELECT ?, ?, 'viewer', ?
+      WHERE EXISTS (
+        SELECT 1 FROM rooms WHERE id = ? AND expires_at > ?
+      )
+      AND (
+        EXISTS (
+          SELECT 1 FROM peers WHERE room_id = ? AND peer_id = ?
+        )
+        OR (
+          SELECT COUNT(*) FROM peers
+          WHERE room_id = ? AND role = 'viewer' AND last_seen_at >= ?
+        ) < ?
+      )
+      ON CONFLICT(room_id, peer_id) DO UPDATE SET last_seen_at = excluded.last_seen_at
+    `)
+    .bind(
+      body.roomId,
+      body.peerId,
+      now,
+      body.roomId,
+      now,
+      body.roomId,
+      body.peerId,
+      body.roomId,
+      now - PEER_TTL_SECONDS,
+      MAX_VIEWERS,
+    )
+    .run();
 
-  if (!existing && (viewers?.count ?? 0) >= 2) {
+  if (registration.meta.changes !== 1) {
+    const currentRoom = await database
+      .prepare(`
+        SELECT 1 AS found
+        FROM rooms
+        INNER JOIN peers ON peers.room_id = rooms.id AND peers.peer_id = rooms.host_id AND peers.role = 'host'
+        WHERE rooms.id = ? AND rooms.expires_at > ? AND peers.last_seen_at >= ?
+      `)
+      .bind(body.roomId, now, now - PEER_TTL_SECONDS)
+      .first<{ found: number }>();
+    if (!currentRoom) return Response.json({ error: 'room_not_found' }, { status: 404 });
     return Response.json({ error: 'room_full' }, { status: 409 });
   }
 
-  await database.batch([
-    database
-      .prepare("INSERT INTO peers (room_id, peer_id, role, last_seen_at) VALUES (?, ?, 'viewer', ?) ON CONFLICT(room_id, peer_id) DO UPDATE SET last_seen_at = excluded.last_seen_at")
-      .bind(body.roomId, body.peerId, now),
-    database
-      .prepare("INSERT INTO signals (room_id, sender_id, recipient_id, kind, payload, created_at) VALUES (?, ?, ?, 'join', '{}', ?)")
-      .bind(body.roomId, body.peerId, room.hostId, now),
-  ]);
+  await database
+    .prepare("INSERT INTO signals (room_id, sender_id, recipient_id, kind, payload, created_at) VALUES (?, ?, ?, 'join', '{}', ?)")
+    .bind(body.roomId, body.peerId, room.hostId, now)
+    .run();
 
   return Response.json({ roomId: body.roomId, hostId: room.hostId });
 }

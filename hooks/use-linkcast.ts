@@ -70,17 +70,27 @@ export function useLinkcast() {
   const pollingRef = useRef<number | null>(null);
   const heartbeatRef = useRef<number | null>(null);
   const pollingFailuresRef = useRef(0);
+  const pollingInFlightRef = useRef(false);
+  const loopGenerationRef = useRef(0);
   const peerConnectionsRef = useRef(new Map<string, RTCPeerConnection>());
   const candidateQueuesRef = useRef(new Map<string, RTCIceCandidateInit[]>());
   const iceRecoveryRef = useRef(new Set<string>());
+  const connectionRecoveryTimersRef = useRef(new Map<string, number>());
+  const remoteStreamRef = useRef<MediaStream | null>(null);
+  const viewerRecoveryRef = useRef(false);
+  const viewerRecoveryTimerRef = useRef<number | null>(null);
+  const viewerReconnectAttemptsRef = useRef(0);
 
   const sendSignal = useCallback(
     async (recipientId: string, kind: 'offer' | 'answer' | 'candidate', payload: unknown) => {
+      const roomId = roomIdRef.current;
+      const senderId = peerIdRef.current;
+      if (!roomId || !senderId) return;
       await api('/api/signals', {
         method: 'POST',
         body: JSON.stringify({
-          roomId: roomIdRef.current,
-          senderId: peerIdRef.current,
+          roomId,
+          senderId,
           recipientId,
           kind,
           payload,
@@ -93,16 +103,86 @@ export function useLinkcast() {
   const flushCandidates = useCallback(async (peerId: string, connection: RTCPeerConnection) => {
     const queued = candidateQueuesRef.current.get(peerId) || [];
     candidateQueuesRef.current.delete(peerId);
-    for (const candidate of queued) await connection.addIceCandidate(candidate);
+    for (const candidate of queued) {
+      await connection.addIceCandidate(candidate).catch(() => undefined);
+    }
   }, []);
 
   const closePeer = useCallback((peerId: string) => {
-    peerConnectionsRef.current.get(peerId)?.close();
+    const connection = peerConnectionsRef.current.get(peerId);
+    if (connection) {
+      connection.onicecandidate = null;
+      connection.oniceconnectionstatechange = null;
+      connection.ontrack = null;
+      connection.close();
+    }
+    const recoveryTimer = connectionRecoveryTimersRef.current.get(peerId);
+    if (recoveryTimer) window.clearTimeout(recoveryTimer);
+    connectionRecoveryTimersRef.current.delete(peerId);
     peerConnectionsRef.current.delete(peerId);
     candidateQueuesRef.current.delete(peerId);
     iceRecoveryRef.current.delete(peerId);
+    if (roleRef.current === 'viewer') {
+      remoteStreamRef.current = null;
+      setRemoteStream(null);
+    }
     setViewerCount(peerConnectionsRef.current.size);
   }, []);
+
+  const scheduleViewerReconnect = useCallback(
+    (remotePeerId: string) => {
+      if (roleRef.current !== 'viewer' || viewerRecoveryRef.current) return;
+
+      const attempt = viewerReconnectAttemptsRef.current + 1;
+      if (attempt > 3) {
+        setStatus('failed');
+        setError('직접 연결이 불안정해요. 링크를 다시 열어 시도해 주세요.');
+        return;
+      }
+
+      viewerReconnectAttemptsRef.current = attempt;
+      viewerRecoveryRef.current = true;
+      setStatus('connecting');
+      if (viewerRecoveryTimerRef.current) window.clearTimeout(viewerRecoveryTimerRef.current);
+
+      const delay = Math.min(500 * 2 ** (attempt - 1), 3000);
+      viewerRecoveryTimerRef.current = window.setTimeout(() => {
+        viewerRecoveryTimerRef.current = null;
+        if (roleRef.current !== 'viewer' || !roomIdRef.current || !peerIdRef.current) {
+          viewerRecoveryRef.current = false;
+          return;
+        }
+
+        closePeer(remotePeerId);
+        void api('/api/rooms', {
+          method: 'POST',
+          body: JSON.stringify({
+            roomId: roomIdRef.current,
+            peerId: peerIdRef.current,
+            role: 'viewer',
+          }),
+        })
+          .then(() => setError((current) => (current === SIGNALING_RETRY_ERROR ? '' : current)))
+          .catch((reason) => {
+            const name = reason instanceof Error ? reason.name : '';
+            if (name === 'room_full') {
+              setStatus('full');
+              setError('참가 인원이 가득 찼어요. 잠시 후 다시 시도해 주세요.');
+            } else if (name === 'room_not_found' || name === 'room_offline') {
+              setStatus('not-found');
+              setError(name === 'room_offline' ? '송출자가 연결되어 있지 않아요.' : '종료되었거나 존재하지 않는 송출이에요.');
+            } else {
+              setStatus('failed');
+              setError('연결 서버에 닿지 못했어요. 링크를 다시 열어 시도해 주세요.');
+            }
+          })
+          .finally(() => {
+            viewerRecoveryRef.current = false;
+          });
+      }, delay);
+    },
+    [closePeer],
+  );
 
   const createPeerConnection = useCallback(
     (remotePeerId: string) => {
@@ -123,29 +203,46 @@ export function useLinkcast() {
       connection.oniceconnectionstatechange = () => {
         if (connection.iceConnectionState === 'connected' || connection.iceConnectionState === 'completed') {
           iceRecoveryRef.current.delete(remotePeerId);
+          viewerReconnectAttemptsRef.current = 0;
+          viewerRecoveryRef.current = false;
           setStatus('connected');
         } else if (connection.iceConnectionState === 'checking') {
           setStatus('connecting');
         } else if (connection.iceConnectionState === 'disconnected') {
           setStatus('connecting');
+          if (!connectionRecoveryTimersRef.current.has(remotePeerId)) {
+            const timer = window.setTimeout(() => {
+              connectionRecoveryTimersRef.current.delete(remotePeerId);
+              if (connection.iceConnectionState === 'disconnected' && roleRef.current === 'viewer') {
+                scheduleViewerReconnect(remotePeerId);
+              }
+            }, 4000);
+            connectionRecoveryTimersRef.current.set(remotePeerId, timer);
+          }
         } else if (connection.iceConnectionState === 'failed') {
           if (roleRef.current === 'host' && !iceRecoveryRef.current.has(remotePeerId)) {
             iceRecoveryRef.current.add(remotePeerId);
             setStatus('connecting');
             void (async () => {
+              const isCurrentConnection = () => peerConnectionsRef.current.get(remotePeerId) === connection;
               try {
-                if (connection.signalingState === 'closed') throw new Error('connection_closed');
+                if (!isCurrentConnection() || connection.signalingState === 'closed') throw new Error('connection_closed');
                 connection.restartIce();
                 const offer = await connection.createOffer({ iceRestart: true });
+                if (!isCurrentConnection()) return;
                 await connection.setLocalDescription(offer);
+                if (!isCurrentConnection()) return;
                 await sendSignal(remotePeerId, 'offer', offer);
               } catch {
+                if (!isCurrentConnection()) return;
                 iceRecoveryRef.current.delete(remotePeerId);
                 setStatus('failed');
                 setError('직접 연결에 실패했어요. 다른 네트워크에서 다시 시도해 주세요.');
                 closePeer(remotePeerId);
               }
             })();
+          } else if (roleRef.current === 'viewer') {
+            scheduleViewerReconnect(remotePeerId);
           } else if (!iceRecoveryRef.current.has(remotePeerId)) {
             setStatus('failed');
             setError('직접 연결에 실패했어요. 다른 네트워크에서 다시 시도해 주세요.');
@@ -177,44 +274,80 @@ export function useLinkcast() {
         setViewerCount(peerConnectionsRef.current.size);
       } else {
         connection.ontrack = (event) => {
-          const stream = event.streams[0] || new MediaStream([event.track]);
+          const stream = remoteStreamRef.current || new MediaStream();
+          if (!stream.getTracks().some((track) => track.id === event.track.id)) {
+            stream.addTrack(event.track);
+          }
+          remoteStreamRef.current = stream;
           setRemoteStream(stream);
         };
       }
 
       return connection;
     },
-    [closePeer, sendSignal],
+    [closePeer, scheduleViewerReconnect, sendSignal],
   );
 
   const handleSignal = useCallback(
-    async (signal: Signal) => {
-      const payload = JSON.parse(signal.payload || '{}') as
-        | RTCSessionDescriptionInit
-        | RTCIceCandidateInit;
+    async (signal: Signal, generation: number) => {
+      if (generation !== loopGenerationRef.current) return;
+
+      let payload: RTCSessionDescriptionInit | RTCIceCandidateInit;
+      try {
+        payload = JSON.parse(signal.payload || '{}') as
+          | RTCSessionDescriptionInit
+          | RTCIceCandidateInit;
+      } catch {
+        return;
+      }
 
       if (signal.kind === 'leave') {
         closePeer(signal.senderId);
-        if (roleRef.current === 'host') setStatus('waiting');
+        if (roleRef.current === 'host') {
+          setStatus('waiting');
+        } else if (roleRef.current === 'viewer') {
+          setStatus('not-found');
+          setError('송출자가 연결을 종료했어요.');
+        }
         return;
       }
 
       if (signal.kind === 'join' && roleRef.current === 'host') {
         if (peerConnectionsRef.current.size >= 2 && !peerConnectionsRef.current.has(signal.senderId)) return;
-        const connection = createPeerConnection(signal.senderId);
+        let connection = peerConnectionsRef.current.get(signal.senderId);
+        if (connection?.signalingState === 'closed' || connection?.iceConnectionState === 'failed') {
+          closePeer(signal.senderId);
+          connection = undefined;
+        }
+        if (connection && iceRecoveryRef.current.has(signal.senderId)) {
+          closePeer(signal.senderId);
+          connection = undefined;
+        }
+        if (connection && connection.signalingState !== 'stable') return;
+        connection = connection || createPeerConnection(signal.senderId);
         const offer = await connection.createOffer();
+        if (generation !== loopGenerationRef.current) return;
         await connection.setLocalDescription(offer);
+        if (generation !== loopGenerationRef.current) return;
         await sendSignal(signal.senderId, 'offer', offer);
         setStatus('connecting');
         return;
       }
 
       if (signal.kind === 'offer' && roleRef.current === 'viewer') {
-        const connection = createPeerConnection(signal.senderId);
+        let connection = peerConnectionsRef.current.get(signal.senderId);
+        if (connection?.signalingState === 'closed' || connection?.iceConnectionState === 'failed') {
+          closePeer(signal.senderId);
+          connection = undefined;
+        }
+        connection = connection || createPeerConnection(signal.senderId);
+        if (generation !== loopGenerationRef.current) return;
         await connection.setRemoteDescription(payload as RTCSessionDescriptionInit);
         await flushCandidates(signal.senderId, connection);
+        if (generation !== loopGenerationRef.current) return;
         const answer = await connection.createAnswer();
         await connection.setLocalDescription(answer);
+        if (generation !== loopGenerationRef.current) return;
         await sendSignal(signal.senderId, 'answer', answer);
         setStatus('connecting');
         return;
@@ -231,11 +364,12 @@ export function useLinkcast() {
       }
 
       if (signal.kind === 'answer' && roleRef.current === 'host') {
+        if (generation !== loopGenerationRef.current) return;
         await connection.setRemoteDescription(payload as RTCSessionDescriptionInit);
         await flushCandidates(signal.senderId, connection);
       } else if (signal.kind === 'candidate') {
         const candidate = payload as RTCIceCandidateInit;
-        if (connection.remoteDescription) await connection.addIceCandidate(candidate);
+        if (connection.remoteDescription) await connection.addIceCandidate(candidate).catch(() => undefined);
         else {
           const queue = candidateQueuesRef.current.get(signal.senderId) || [];
           queue.push(candidate);
@@ -247,17 +381,29 @@ export function useLinkcast() {
   );
 
   const stopLoops = useCallback(() => {
+    loopGenerationRef.current += 1;
     if (pollingRef.current) window.clearInterval(pollingRef.current);
     if (heartbeatRef.current) window.clearInterval(heartbeatRef.current);
+    if (viewerRecoveryTimerRef.current) window.clearTimeout(viewerRecoveryTimerRef.current);
     pollingRef.current = null;
     heartbeatRef.current = null;
+    viewerRecoveryTimerRef.current = null;
+    viewerRecoveryRef.current = false;
+    pollingInFlightRef.current = false;
   }, []);
 
   const startLoops = useCallback(() => {
     stopLoops();
     pollingFailuresRef.current = 0;
+    const generation = loopGenerationRef.current;
     const poll = async () => {
-      if (!roomIdRef.current || !peerIdRef.current) return;
+      if (
+        generation !== loopGenerationRef.current ||
+        pollingInFlightRef.current ||
+        !roomIdRef.current ||
+        !peerIdRef.current
+      ) return;
+      pollingInFlightRef.current = true;
       try {
         const query = new URLSearchParams({
           roomId: roomIdRef.current,
@@ -266,14 +412,23 @@ export function useLinkcast() {
         });
         const result = await api<{ signals: Signal[] }>(`/api/signals?${query}`);
         for (const signal of result.signals) {
-          lastSignalIdRef.current = Math.max(lastSignalIdRef.current, signal.id);
-          await handleSignal(signal);
+          if (generation !== loopGenerationRef.current) break;
+          await handleSignal(signal, generation);
+          if (generation === loopGenerationRef.current) {
+            lastSignalIdRef.current = Math.max(lastSignalIdRef.current, signal.id);
+          }
         }
-        pollingFailuresRef.current = 0;
-        setError((current) => (current === SIGNALING_RETRY_ERROR ? '' : current));
+        if (generation === loopGenerationRef.current) {
+          pollingFailuresRef.current = 0;
+          setError((current) => (current === SIGNALING_RETRY_ERROR ? '' : current));
+        }
       } catch {
-        pollingFailuresRef.current += 1;
-        if (pollingFailuresRef.current >= 8) setError(SIGNALING_RETRY_ERROR);
+        if (generation === loopGenerationRef.current) {
+          pollingFailuresRef.current += 1;
+          if (pollingFailuresRef.current >= 8) setError(SIGNALING_RETRY_ERROR);
+        }
+      } finally {
+        if (generation === loopGenerationRef.current) pollingInFlightRef.current = false;
       }
     };
     void poll();
@@ -290,15 +445,31 @@ export function useLinkcast() {
     stopLoops();
     const currentRoom = roomIdRef.current;
     const currentPeer = peerIdRef.current;
-    peerConnectionsRef.current.forEach((connection) => connection.close());
+    peerConnectionsRef.current.forEach((connection) => {
+      connection.onicecandidate = null;
+      connection.oniceconnectionstatechange = null;
+      connection.ontrack = null;
+      connection.close();
+    });
     peerConnectionsRef.current.clear();
     candidateQueuesRef.current.clear();
     iceRecoveryRef.current.clear();
+    connectionRecoveryTimersRef.current.forEach((timer) => window.clearTimeout(timer));
+    connectionRecoveryTimersRef.current.clear();
+    remoteStreamRef.current = null;
+    viewerReconnectAttemptsRef.current = 0;
     setRemoteStream(null);
     setViewerCount(0);
     setStatus('idle');
     setRoomId('');
     setError('');
+
+    roleRef.current = null;
+    roomIdRef.current = '';
+    peerIdRef.current = '';
+    hostIdRef.current = '';
+    lastSignalIdRef.current = 0;
+
     if (currentRoom && currentPeer) {
       await api('/api/rooms', {
         method: 'DELETE',
@@ -306,11 +477,6 @@ export function useLinkcast() {
         keepalive: true,
       }).catch(() => undefined);
     }
-    roleRef.current = null;
-    roomIdRef.current = '';
-    peerIdRef.current = '';
-    hostIdRef.current = '';
-    lastSignalIdRef.current = 0;
   }, [stopLoops]);
 
   const createRoom = useCallback(
@@ -367,9 +533,9 @@ export function useLinkcast() {
         if (name === 'room_full') {
           setStatus('full');
           setError('참가 인원이 가득 찼어요.');
-        } else if (name === 'room_not_found') {
+        } else if (name === 'room_not_found' || name === 'room_offline') {
           setStatus('not-found');
-          setError('종료되었거나 존재하지 않는 송출이에요.');
+          setError(name === 'room_offline' ? '송출자가 연결되어 있지 않아요.' : '종료되었거나 존재하지 않는 송출이에요.');
         } else {
           setStatus('failed');
           setError('송출에 연결하지 못했어요.');
