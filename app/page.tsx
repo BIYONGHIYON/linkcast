@@ -412,35 +412,35 @@ export default function Home() {
 
   return (
     <main className="min-h-dvh bg-background text-foreground">
-      <header className="mx-auto flex h-20 max-w-[1480px] items-center justify-between px-5 sm:px-8 lg:px-12">
+      <header className="mx-auto flex h-20 max-w-[1480px] items-center justify-between px-3 sm:px-8 lg:px-12">
         <div className="flex items-center gap-2.5" aria-label="Linkcast">
           <span className="grid size-8 place-items-center rounded-full bg-foreground text-background">
             <Radio className="size-4" strokeWidth={2.2} />
           </span>
           <span className="text-lg font-semibold tracking-[-0.035em]">Linkcast</span>
         </div>
-        <div className="flex items-center gap-2 text-sm text-muted-foreground">
+        <div className="flex max-w-[48%] items-center gap-2 truncate text-xs text-muted-foreground sm:max-w-none sm:text-sm">
           <span className={`size-2 rounded-full ${status === 'connected' ? 'bg-[#58d68d] shadow-[0_0_0_4px_rgba(88,214,141,0.12)]' : 'bg-border'}`} />
-          {statusLabel(status)}
+          <span className="truncate">{statusLabel(status)}</span>
         </div>
       </header>
 
-      <section className="mx-auto max-w-[1480px] px-5 pb-6 sm:px-8 sm:pb-8 lg:px-12">
+      <section className="mx-auto max-w-[1480px] px-3 pb-5 sm:px-8 sm:pb-8 lg:px-12">
         <Tabs value={mode} onValueChange={(value) => changeMode(value as 'host' | 'viewer')} className="gap-6">
-          <div className="flex items-end justify-between gap-4 border-b border-border pb-4">
+          <div className="flex flex-col gap-4 border-b border-border pb-4 sm:flex-row sm:items-end sm:justify-between">
             <div>
               <p className="mb-1 text-sm text-muted-foreground">1080p · 60fps · WebRTC</p>
               <h1 className="text-2xl font-semibold tracking-[-0.04em] sm:text-3xl">지연 없이, 링크 하나로.</h1>
             </div>
-            <TabsList className="h-10 rounded-full bg-muted/80 p-1">
-              <TabsTrigger value="host" className="h-8 rounded-full px-4">송출</TabsTrigger>
-              <TabsTrigger value="viewer" className="h-8 rounded-full px-4">참가</TabsTrigger>
+            <TabsList className="h-10 w-full rounded-full bg-muted/80 p-1 sm:w-auto">
+              <TabsTrigger value="host" className="h-8 flex-1 rounded-full px-4 sm:flex-none">송출</TabsTrigger>
+              <TabsTrigger value="viewer" className="h-8 flex-1 rounded-full px-4 sm:flex-none">참가</TabsTrigger>
             </TabsList>
           </div>
 
           <TabsContent value="host">
             <div className="grid gap-5 lg:grid-cols-[minmax(0,1fr)_340px]">
-              <section ref={hostStageRef} onPointerDown={revealHostControls} className={`group relative overflow-hidden bg-[#0b0d0f] shadow-[0_24px_80px_rgba(8,11,14,0.16)] ${isHostFullscreen ? 'h-dvh w-screen rounded-none' : 'aspect-video min-h-[280px] rounded-[28px]'}`}>
+              <section ref={hostStageRef} onPointerDown={revealHostControls} className={`group relative overflow-hidden bg-[#0b0d0f] shadow-[0_24px_80px_rgba(8,11,14,0.16)] ${isHostFullscreen ? 'h-dvh w-screen rounded-none' : 'aspect-video min-h-0 rounded-2xl sm:min-h-[280px] sm:rounded-[28px]'}`}>
                 <video ref={previewVideoRef} muted={!hostAudioEnabled} playsInline onDoubleClick={() => void toggleHostFullscreen()} className={`h-full w-full object-contain transition-opacity duration-300 ${isPreviewing ? 'opacity-100' : 'opacity-0'} ${isPreviewing ? 'cursor-zoom-in' : ''}`}>
                   <track kind="captions" srcLang="ko" label="한국어" src="/captions-empty.vtt" />
                 </video>
@@ -466,7 +466,7 @@ export default function Home() {
                     <div className="flex items-center gap-2">
                       {isPreviewing && (
                         <>
-                          <span className="rounded-full border border-white/10 bg-black/35 px-3 py-1.5 text-xs font-medium text-white/80 backdrop-blur-md">
+                          <span className="hidden rounded-full border border-white/10 bg-black/35 px-3 py-1.5 text-xs font-medium text-white/80 backdrop-blur-md sm:inline-flex">
                             {resolution} · {frameRate}
                           </span>
                           <Button variant="ghost" size="icon" onClick={() => void toggleHostAudio()} aria-label={hostAudioEnabled ? '송출자 소리 끄기' : '송출자 소리 켜기'} className="rounded-full border border-white/10 bg-black/35 text-white/80 hover:bg-black/55 hover:text-white">
@@ -482,7 +482,7 @@ export default function Home() {
                 )}
               </section>
 
-              <aside className="flex flex-col rounded-[28px] border border-border bg-card p-5 sm:p-6">
+              <aside className="flex flex-col rounded-2xl border border-border bg-card p-4 sm:rounded-[28px] sm:p-6">
                 <div className="flex items-center justify-between">
                   <div>
                     <p className="text-sm text-muted-foreground">영상 입력</p>
@@ -550,7 +550,7 @@ export default function Home() {
 
           <TabsContent value="viewer">
             {roomId && status !== 'not-found' && status !== 'full' && status !== 'failed' ? (
-              <section ref={viewerStageRef} onPointerDown={revealViewerControls} className={`group relative overflow-hidden bg-[#0b0d0f] shadow-[0_24px_80px_rgba(8,11,14,0.16)] ${isViewerFullscreen ? 'h-dvh w-screen rounded-none' : 'aspect-video min-h-[300px] rounded-[28px]'}`}>
+              <section ref={viewerStageRef} onPointerDown={revealViewerControls} className={`group relative overflow-hidden bg-[#0b0d0f] shadow-[0_24px_80px_rgba(8,11,14,0.16)] ${isViewerFullscreen ? 'h-dvh w-screen rounded-none' : 'aspect-video min-h-0 rounded-2xl sm:min-h-[300px] sm:rounded-[28px]'}`}>
                 <video ref={viewerVideoRef} autoPlay playsInline onDoubleClick={() => void toggleViewerFullscreen()} className={`h-full w-full object-contain transition-opacity duration-300 ${remoteStream ? 'opacity-100' : 'opacity-0'} ${remoteStream ? 'cursor-zoom-in' : ''}`}>
                   <track kind="captions" srcLang="ko" label="한국어" src="/captions-empty.vtt" />
                 </video>
@@ -583,14 +583,14 @@ export default function Home() {
                 )}
               </section>
             ) : (
-              <div className="grid min-h-[min(680px,calc(100dvh-190px))] place-items-center rounded-[28px] border border-border bg-card px-5 py-12">
+              <div className="grid min-h-[min(520px,calc(100dvh-170px))] place-items-center rounded-2xl border border-border bg-card px-4 py-10 sm:min-h-[min(680px,calc(100dvh-190px))] sm:rounded-[28px] sm:px-5 sm:py-12">
                 <div className="w-full max-w-md text-center">
                   <span className="mx-auto grid size-14 place-items-center rounded-full bg-muted text-foreground"><Link2 className="size-5" /></span>
                   <h2 className="mt-6 text-2xl font-semibold tracking-[-0.04em]">송출에 참가하기</h2>
                   <p className="mt-2 text-sm leading-6 text-muted-foreground">받은 링크 또는 방 코드를 입력하세요</p>
-                  <div className="mt-7 flex gap-2">
+                  <div className="mt-7 flex flex-col gap-3 sm:flex-row sm:gap-2">
                     <Input value={joinValue} onChange={(event) => setJoinValue(event.target.value)} onKeyDown={(event) => { if (event.key === 'Enter') void connectViewer(joinValue); }} placeholder="링크 또는 방 코드" aria-label="링크 또는 방 코드" className="h-12 rounded-full px-5" />
-                    <Button size="lg" onClick={() => void connectViewer(joinValue)} disabled={!joinValue.trim() || status === 'connecting'} className="h-12 rounded-full px-5">참가</Button>
+                    <Button size="lg" onClick={() => void connectViewer(joinValue)} disabled={!joinValue.trim() || status === 'connecting'} className="h-12 w-full rounded-full px-5 sm:w-auto">참가</Button>
                   </div>
                   {connectionError && <p role="alert" className="mt-5 text-sm text-destructive">{connectionError}</p>}
                 </div>
