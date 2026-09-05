@@ -94,6 +94,8 @@ export default function Home() {
   const [hostAudioEnabled, setHostAudioEnabled] = useState(true);
   const [playbackBlocked, setPlaybackBlocked] = useState(false);
   const [viewerVideoReady, setViewerVideoReady] = useState(false);
+  const [hostAspectRatio, setHostAspectRatio] = useState<number | null>(null);
+  const [viewerAspectRatio, setViewerAspectRatio] = useState<number | null>(null);
   const [isHostFullscreen, setIsHostFullscreen] = useState(false);
   const [showHostControls, setShowHostControls] = useState(true);
   const [isViewerFullscreen, setIsViewerFullscreen] = useState(false);
@@ -122,6 +124,7 @@ export default function Home() {
     if (previewVideoRef.current) previewVideoRef.current.srcObject = null;
     setIsPreviewing(false);
     setHostAudioEnabled(false);
+    setHostAspectRatio(null);
     setShowHostControls(true);
     setCaptureInfo({});
   }, [leave]);
@@ -150,6 +153,7 @@ export default function Home() {
   const startPreview = useCallback(
     async (videoDeviceId?: string, audioDeviceId?: string) => {
       setCaptureError('');
+      setHostAspectRatio(null);
       await leave();
       streamRef.current?.getTracks().forEach((track) => track.stop());
 
@@ -180,6 +184,9 @@ export default function Home() {
         }
         const videoSettings = stream.getVideoTracks()[0]?.getSettings();
         const audioSettings = stream.getAudioTracks()[0]?.getSettings();
+        if (videoSettings?.width && videoSettings.height) {
+          setHostAspectRatio(videoSettings.width / videoSettings.height);
+        }
         setCaptureInfo({
           width: videoSettings?.width,
           height: videoSettings?.height,
@@ -235,6 +242,7 @@ export default function Home() {
 
     setViewerVideoReady(false);
     setPlaybackBlocked(false);
+    setViewerAspectRatio(null);
     video.onplaying = () => {
       setViewerVideoReady(true);
       setPlaybackBlocked(false);
@@ -254,7 +262,12 @@ export default function Home() {
     };
 
     video.srcObject = remoteStream;
-    video.onloadedmetadata = tryPlay;
+    video.onloadedmetadata = () => {
+      if (video.videoWidth && video.videoHeight) {
+        setViewerAspectRatio(video.videoWidth / video.videoHeight);
+      }
+      tryPlay();
+    };
     tryPlay();
 
     return () => {
@@ -262,6 +275,13 @@ export default function Home() {
       video.onloadedmetadata = null;
     };
   }, [remoteStream]);
+
+  const updateHostAspectRatio = useCallback(() => {
+    const video = previewVideoRef.current;
+    if (video?.videoWidth && video.videoHeight) {
+      setHostAspectRatio(video.videoWidth / video.videoHeight);
+    }
+  }, []);
 
   const createShareLink = useCallback(async () => {
     if (!streamRef.current) return null;
@@ -466,8 +486,8 @@ export default function Home() {
 
           <TabsContent value="host">
             <div className="grid gap-5 lg:grid-cols-[minmax(0,1fr)_340px]">
-              <section ref={hostStageRef} onPointerDown={revealHostControls} className={`group relative overflow-hidden bg-[#0b0d0f] shadow-[0_24px_80px_rgba(8,11,14,0.16)] ${isHostFullscreen ? 'h-dvh w-screen rounded-none' : 'aspect-video min-h-0 rounded-2xl sm:min-h-[280px] sm:rounded-[28px]'}`}>
-                <video ref={previewVideoRef} muted={!hostAudioEnabled} playsInline onDoubleClick={() => void toggleHostFullscreen()} className={`h-full w-full object-contain transition-opacity duration-300 ${isPreviewing ? 'opacity-100' : 'opacity-0'} ${isPreviewing ? 'cursor-zoom-in' : ''}`}>
+              <section ref={hostStageRef} onPointerDown={revealHostControls} style={!isHostFullscreen && hostAspectRatio ? { aspectRatio: hostAspectRatio } : undefined} className={`group relative overflow-hidden bg-[#0b0d0f] shadow-[0_24px_80px_rgba(8,11,14,0.16)] ${isHostFullscreen ? 'h-dvh w-screen rounded-none' : 'aspect-video min-h-0 rounded-2xl sm:min-h-[280px] sm:rounded-[28px]'}`}>
+                <video ref={previewVideoRef} muted={!hostAudioEnabled} playsInline onLoadedMetadata={updateHostAspectRatio} onDoubleClick={() => void toggleHostFullscreen()} className={`block h-full w-full object-contain transition-opacity duration-300 ${isPreviewing ? 'opacity-100' : 'opacity-0'} ${isPreviewing ? 'cursor-zoom-in' : ''}`}>
                   <track kind="captions" srcLang="ko" label="한국어" src="/captions-empty.vtt" />
                 </video>
 
@@ -576,8 +596,8 @@ export default function Home() {
 
           <TabsContent value="viewer">
             {roomId && status !== 'not-found' && status !== 'full' && status !== 'failed' ? (
-              <section ref={viewerStageRef} onPointerDown={revealViewerControls} className={`group relative overflow-hidden bg-[#0b0d0f] shadow-[0_24px_80px_rgba(8,11,14,0.16)] ${isViewerFullscreen ? 'h-dvh w-screen rounded-none' : 'aspect-video min-h-0 rounded-2xl sm:min-h-[300px] sm:rounded-[28px]'}`}>
-                <video ref={viewerVideoRef} autoPlay playsInline onDoubleClick={() => void toggleViewerFullscreen()} className={`h-full w-full object-contain transition-opacity duration-300 ${remoteStream && viewerVideoReady ? 'opacity-100' : 'opacity-0'} ${remoteStream ? 'cursor-zoom-in' : ''}`}>
+              <section ref={viewerStageRef} onPointerDown={revealViewerControls} style={!isViewerFullscreen && viewerAspectRatio ? { aspectRatio: viewerAspectRatio } : undefined} className={`group relative overflow-hidden bg-[#0b0d0f] shadow-[0_24px_80px_rgba(8,11,14,0.16)] ${isViewerFullscreen ? 'h-dvh w-screen rounded-none' : 'aspect-video min-h-0 rounded-2xl sm:min-h-[300px] sm:rounded-[28px]'}`}>
+                <video ref={viewerVideoRef} autoPlay playsInline onDoubleClick={() => void toggleViewerFullscreen()} className={`block h-full w-full object-contain transition-opacity duration-300 ${remoteStream && viewerVideoReady ? 'opacity-100' : 'opacity-0'} ${remoteStream ? 'cursor-zoom-in' : ''}`}>
                   <track kind="captions" srcLang="ko" label="한국어" src="/captions-empty.vtt" />
                 </video>
                 {(!remoteStream || !viewerVideoReady) && (
