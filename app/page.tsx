@@ -75,6 +75,7 @@ export default function Home() {
   const previewVideoRef = useRef<HTMLVideoElement>(null);
   const viewerVideoRef = useRef<HTMLVideoElement>(null);
   const viewerStageRef = useRef<HTMLElement>(null);
+  const viewerControlsTimerRef = useRef<number | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
   const autoJoinRef = useRef('');
   const [mode, setMode] = useState<'host' | 'viewer'>('host');
@@ -89,6 +90,7 @@ export default function Home() {
   const [captureError, setCaptureError] = useState('');
   const [playbackBlocked, setPlaybackBlocked] = useState(false);
   const [isViewerFullscreen, setIsViewerFullscreen] = useState(false);
+  const [showViewerControls, setShowViewerControls] = useState(true);
 
   const {
     status,
@@ -245,19 +247,38 @@ export default function Home() {
   const toggleViewerFullscreen = useCallback(async () => {
     if (!viewerStageRef.current) return;
     try {
-      if (document.fullscreenElement) await document.exitFullscreen();
-      else await viewerStageRef.current.requestFullscreen();
+      if (document.fullscreenElement) {
+        await document.exitFullscreen();
+      } else {
+        setShowViewerControls(false);
+        await viewerStageRef.current.requestFullscreen();
+      }
     } catch {
       setIsViewerFullscreen(false);
+      setShowViewerControls(true);
     }
   }, []);
 
+  const revealViewerControls = useCallback(() => {
+    setShowViewerControls(true);
+    if (viewerControlsTimerRef.current) window.clearTimeout(viewerControlsTimerRef.current);
+    if (isViewerFullscreen) {
+      viewerControlsTimerRef.current = window.setTimeout(() => setShowViewerControls(false), 3200);
+    }
+  }, [isViewerFullscreen]);
+
   useEffect(() => {
     const handleFullscreenChange = () => {
-      setIsViewerFullscreen(document.fullscreenElement === viewerStageRef.current);
+      const fullscreen = document.fullscreenElement === viewerStageRef.current;
+      setIsViewerFullscreen(fullscreen);
+      setShowViewerControls(!fullscreen);
+      if (viewerControlsTimerRef.current) window.clearTimeout(viewerControlsTimerRef.current);
     };
     document.addEventListener('fullscreenchange', handleFullscreenChange);
-    return () => document.removeEventListener('fullscreenchange', handleFullscreenChange);
+    return () => {
+      document.removeEventListener('fullscreenchange', handleFullscreenChange);
+      if (viewerControlsTimerRef.current) window.clearTimeout(viewerControlsTimerRef.current);
+    };
   }, []);
 
   useEffect(() => {
@@ -451,8 +472,8 @@ export default function Home() {
 
           <TabsContent value="viewer">
             {roomId && status !== 'not-found' && status !== 'full' && status !== 'failed' ? (
-              <section ref={viewerStageRef} className={`group relative overflow-hidden bg-[#0b0d0f] shadow-[0_24px_80px_rgba(8,11,14,0.16)] ${isViewerFullscreen ? 'h-dvh w-screen rounded-none' : 'aspect-video min-h-[300px] rounded-[28px]'}`}>
-                <video ref={viewerVideoRef} autoPlay playsInline controls={Boolean(remoteStream)} onDoubleClick={() => void toggleViewerFullscreen()} className={`h-full w-full object-contain transition-opacity duration-300 ${remoteStream ? 'opacity-100' : 'opacity-0'} ${remoteStream ? 'cursor-zoom-in' : ''}`}>
+              <section ref={viewerStageRef} onPointerDown={revealViewerControls} className={`group relative overflow-hidden bg-[#0b0d0f] shadow-[0_24px_80px_rgba(8,11,14,0.16)] ${isViewerFullscreen ? 'h-dvh w-screen rounded-none' : 'aspect-video min-h-[300px] rounded-[28px]'}`}>
+                <video ref={viewerVideoRef} autoPlay playsInline onDoubleClick={() => void toggleViewerFullscreen()} className={`h-full w-full object-contain transition-opacity duration-300 ${remoteStream ? 'opacity-100' : 'opacity-0'} ${remoteStream ? 'cursor-zoom-in' : ''}`}>
                   <track kind="captions" srcLang="ko" label="한국어" src="/captions-empty.vtt" />
                 </video>
                 {!remoteStream && (
@@ -464,18 +485,20 @@ export default function Home() {
                     </div>
                   </div>
                 )}
-                <div className="absolute inset-x-0 top-0 flex items-center justify-between p-4 sm:p-5">
-                  <span className="rounded-full border border-white/10 bg-black/35 px-3 py-1.5 text-xs font-medium text-white/80 backdrop-blur-md">{status === 'connected' ? 'LIVE' : 'CONNECTING'}</span>
-                  <div className="flex items-center gap-2">
-                    {remoteStream && (
-                      <Button variant="ghost" size="icon" onClick={() => void toggleViewerFullscreen()} aria-label={isViewerFullscreen ? '전체화면 종료' : '전체화면 보기'} className="rounded-full border border-white/10 bg-black/35 text-white/80 hover:bg-black/55 hover:text-white">
-                        {isViewerFullscreen ? <Minimize2 /> : <Maximize2 />}
-                      </Button>
-                    )}
-                    <Button variant="ghost" size="sm" onClick={() => { void leave(); setJoinValue(''); window.history.replaceState(null, '', '/'); }} className="rounded-full border border-white/10 bg-black/35 px-3 text-white/80 hover:bg-black/55 hover:text-white"><LogOut /> 나가기</Button>
+                {(!isViewerFullscreen || showViewerControls) && (
+                  <div className="absolute inset-x-0 top-0 flex items-center justify-between p-4 sm:p-5">
+                    <span className="rounded-full border border-white/10 bg-black/35 px-3 py-1.5 text-xs font-medium text-white/80 backdrop-blur-md">{status === 'connected' ? 'LIVE' : 'CONNECTING'}</span>
+                    <div className="flex items-center gap-2">
+                      {remoteStream && (
+                        <Button variant="ghost" size="icon" onClick={() => void toggleViewerFullscreen()} aria-label={isViewerFullscreen ? '전체화면 종료' : '전체화면 보기'} className="rounded-full border border-white/10 bg-black/35 text-white/80 hover:bg-black/55 hover:text-white">
+                          {isViewerFullscreen ? <Minimize2 /> : <Maximize2 />}
+                        </Button>
+                      )}
+                      <Button variant="ghost" size="sm" onClick={() => { void leave(); setJoinValue(''); window.history.replaceState(null, '', '/'); }} className="rounded-full border border-white/10 bg-black/35 px-3 text-white/80 hover:bg-black/55 hover:text-white"><LogOut /> 나가기</Button>
+                    </div>
                   </div>
-                </div>
-                {playbackBlocked && (
+                )}
+                {playbackBlocked && (!isViewerFullscreen || showViewerControls) && (
                   <div className="absolute inset-x-0 bottom-6 flex justify-center">
                     <Button onClick={() => void viewerVideoRef.current?.play().then(() => setPlaybackBlocked(false))} className="h-11 rounded-full bg-white px-5 text-[#0b0d0f] hover:bg-white/90"><Volume2 /> 소리와 함께 재생</Button>
                   </div>

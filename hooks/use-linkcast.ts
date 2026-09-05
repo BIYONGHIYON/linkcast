@@ -32,6 +32,7 @@ const rtcConfiguration: RTCConfiguration = {
 };
 
 const SIGNALING_RETRY_ERROR = '연결 서버에 닿지 못했어요. 다시 연결하고 있습니다.';
+const VIDEO_MAX_BITRATE = 12_000_000;
 
 function randomId() {
   return crypto.randomUUID().replaceAll('-', '');
@@ -71,6 +72,7 @@ export function useLinkcast() {
   const pollingFailuresRef = useRef(0);
   const peerConnectionsRef = useRef(new Map<string, RTCPeerConnection>());
   const candidateQueuesRef = useRef(new Map<string, RTCIceCandidateInit[]>());
+  const iceRecoveryRef = useRef(new Set<string>());
 
   const sendSignal = useCallback(
     async (recipientId: string, kind: 'offer' | 'answer' | 'candidate', payload: unknown) => {
@@ -98,6 +100,7 @@ export function useLinkcast() {
     peerConnectionsRef.current.get(peerId)?.close();
     peerConnectionsRef.current.delete(peerId);
     candidateQueuesRef.current.delete(peerId);
+    iceRecoveryRef.current.delete(peerId);
     setViewerCount(peerConnectionsRef.current.size);
   }, []);
 
@@ -119,13 +122,35 @@ export function useLinkcast() {
 
       connection.oniceconnectionstatechange = () => {
         if (connection.iceConnectionState === 'connected' || connection.iceConnectionState === 'completed') {
+          iceRecoveryRef.current.delete(remotePeerId);
           setStatus('connected');
         } else if (connection.iceConnectionState === 'checking') {
           setStatus('connecting');
+        } else if (connection.iceConnectionState === 'disconnected') {
+          setStatus('connecting');
         } else if (connection.iceConnectionState === 'failed') {
-          setStatus('failed');
-          setError('직접 연결에 실패했어요. 다른 네트워크에서 다시 시도해 주세요.');
-          closePeer(remotePeerId);
+          if (roleRef.current === 'host' && !iceRecoveryRef.current.has(remotePeerId)) {
+            iceRecoveryRef.current.add(remotePeerId);
+            setStatus('connecting');
+            void (async () => {
+              try {
+                if (connection.signalingState === 'closed') throw new Error('connection_closed');
+                connection.restartIce();
+                const offer = await connection.createOffer({ iceRestart: true });
+                await connection.setLocalDescription(offer);
+                await sendSignal(remotePeerId, 'offer', offer);
+              } catch {
+                iceRecoveryRef.current.delete(remotePeerId);
+                setStatus('failed');
+                setError('직접 연결에 실패했어요. 다른 네트워크에서 다시 시도해 주세요.');
+                closePeer(remotePeerId);
+              }
+            })();
+          } else if (!iceRecoveryRef.current.has(remotePeerId)) {
+            setStatus('failed');
+            setError('직접 연결에 실패했어요. 다른 네트워크에서 다시 시도해 주세요.');
+            closePeer(remotePeerId);
+          }
         }
       };
 
@@ -136,9 +161,17 @@ export function useLinkcast() {
           if (track.kind === 'video') {
             const parameters = sender.getParameters();
             parameters.encodings = parameters.encodings.length ? parameters.encodings : [{}];
-            parameters.encodings[0].maxBitrate = 12_000_000;
+            parameters.degradationPreference = 'balanced';
+            parameters.encodings[0].maxBitrate = VIDEO_MAX_BITRATE;
             parameters.encodings[0].maxFramerate = 60;
-            void sender.setParameters(parameters).catch(() => undefined);
+            parameters.encodings[0].scaleResolutionDownBy = 1;
+            void sender.setParameters(parameters).catch(async () => {
+              const fallback = sender.getParameters();
+              fallback.encodings = fallback.encodings.length ? fallback.encodings : [{}];
+              fallback.encodings[0].maxBitrate = VIDEO_MAX_BITRATE;
+              fallback.encodings[0].maxFramerate = 60;
+              await sender.setParameters(fallback).catch(() => undefined);
+            });
           }
         }
         setViewerCount(peerConnectionsRef.current.size);
@@ -260,6 +293,7 @@ export function useLinkcast() {
     peerConnectionsRef.current.forEach((connection) => connection.close());
     peerConnectionsRef.current.clear();
     candidateQueuesRef.current.clear();
+    iceRecoveryRef.current.clear();
     setRemoteStream(null);
     setViewerCount(0);
     setStatus('idle');
