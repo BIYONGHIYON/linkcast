@@ -46,6 +46,43 @@ type ModelContextLike = {
   ) => void | Promise<void>;
 };
 
+type WebkitFullscreenVideo = HTMLVideoElement & {
+  webkitEnterFullscreen?: () => void;
+  webkitExitFullscreen?: () => void;
+};
+
+async function requestFullscreenWithFallback(stage: HTMLElement, video: HTMLVideoElement | null) {
+  if (typeof stage.requestFullscreen === 'function') {
+    try {
+      await stage.requestFullscreen();
+      return 'document';
+    } catch {
+      // Try the video element below for mobile browsers with partial support.
+    }
+  }
+
+  if (video && typeof video.requestFullscreen === 'function') {
+    try {
+      await video.requestFullscreen();
+      return 'document';
+    } catch {
+      // Try the WebKit video fullscreen API below.
+    }
+  }
+
+  const webkitVideo = video as WebkitFullscreenVideo | null;
+  if (webkitVideo?.webkitEnterFullscreen) {
+    try {
+      webkitVideo.webkitEnterFullscreen();
+      return 'native';
+    } catch {
+      // The browser does not allow native video fullscreen for this stream.
+    }
+  }
+
+  return null;
+}
+
 function normalizeRoomValue(value: string) {
   const match = value.match(/[?&]room=([^&]+)/);
   return (match ? decodeURIComponent(match[1]) : value).trim();
@@ -77,6 +114,8 @@ export default function Home() {
   const viewerVideoRef = useRef<HTMLVideoElement>(null);
   const hostStageRef = useRef<HTMLElement>(null);
   const viewerStageRef = useRef<HTMLElement>(null);
+  const nativeHostFullscreenRef = useRef(false);
+  const nativeViewerFullscreenRef = useRef(false);
   const hostControlsTimerRef = useRef<number | null>(null);
   const viewerControlsTimerRef = useRef<number | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
@@ -300,6 +339,14 @@ export default function Home() {
   const changeMode = (nextMode: 'host' | 'viewer') => {
     if (nextMode === mode) return;
     if (document.fullscreenElement) void document.exitFullscreen();
+    if (nativeHostFullscreenRef.current) {
+      (previewVideoRef.current as WebkitFullscreenVideo | null)?.webkitExitFullscreen?.();
+    }
+    if (nativeViewerFullscreenRef.current) {
+      (viewerVideoRef.current as WebkitFullscreenVideo | null)?.webkitExitFullscreen?.();
+    }
+    nativeHostFullscreenRef.current = false;
+    nativeViewerFullscreenRef.current = false;
     void leave();
     setMode(nextMode);
     setJoinValue('');
@@ -328,15 +375,32 @@ export default function Home() {
   }, [hostAudioEnabled]);
 
   const toggleHostFullscreen = useCallback(async () => {
-    if (!hostStageRef.current) return;
+    const stage = hostStageRef.current;
+    const video = previewVideoRef.current;
+    if (!stage) return;
     try {
+      const nativeVideo = video as WebkitFullscreenVideo | null;
+      if (nativeHostFullscreenRef.current) {
+        nativeVideo?.webkitExitFullscreen?.();
+        nativeHostFullscreenRef.current = false;
+        setIsHostFullscreen(false);
+        setShowHostControls(true);
+        return;
+      }
       if (document.fullscreenElement) {
         await document.exitFullscreen();
-      } else {
-        setShowHostControls(false);
-        await hostStageRef.current.requestFullscreen();
+        return;
+      }
+      setShowHostControls(false);
+      const fullscreenMode = await requestFullscreenWithFallback(stage, video);
+      if (fullscreenMode === 'native') {
+        nativeHostFullscreenRef.current = true;
+        setIsHostFullscreen(true);
+      } else if (!fullscreenMode) {
+        throw new Error('fullscreen_unsupported');
       }
     } catch {
+      nativeHostFullscreenRef.current = false;
       setIsHostFullscreen(false);
       setShowHostControls(true);
     }
@@ -351,15 +415,32 @@ export default function Home() {
   }, [isHostFullscreen]);
 
   const toggleViewerFullscreen = useCallback(async () => {
-    if (!viewerStageRef.current) return;
+    const stage = viewerStageRef.current;
+    const video = viewerVideoRef.current;
+    if (!stage) return;
     try {
+      const nativeVideo = video as WebkitFullscreenVideo | null;
+      if (nativeViewerFullscreenRef.current) {
+        nativeVideo?.webkitExitFullscreen?.();
+        nativeViewerFullscreenRef.current = false;
+        setIsViewerFullscreen(false);
+        setShowViewerControls(true);
+        return;
+      }
       if (document.fullscreenElement) {
         await document.exitFullscreen();
-      } else {
-        setShowViewerControls(false);
-        await viewerStageRef.current.requestFullscreen();
+        return;
+      }
+      setShowViewerControls(false);
+      const fullscreenMode = await requestFullscreenWithFallback(stage, video);
+      if (fullscreenMode === 'native') {
+        nativeViewerFullscreenRef.current = true;
+        setIsViewerFullscreen(true);
+      } else if (!fullscreenMode) {
+        throw new Error('fullscreen_unsupported');
       }
     } catch {
+      nativeViewerFullscreenRef.current = false;
       setIsViewerFullscreen(false);
       setShowViewerControls(true);
     }
@@ -374,9 +455,37 @@ export default function Home() {
   }, [isViewerFullscreen]);
 
   useEffect(() => {
+    const hostVideo = previewVideoRef.current;
+    const viewerVideo = viewerVideoRef.current;
+    const handleNativeHostBegin = () => {
+      nativeHostFullscreenRef.current = true;
+      setIsHostFullscreen(true);
+      setShowHostControls(false);
+    };
+    const handleNativeHostEnd = () => {
+      nativeHostFullscreenRef.current = false;
+      setIsHostFullscreen(false);
+      setShowHostControls(true);
+    };
+    const handleNativeViewerBegin = () => {
+      nativeViewerFullscreenRef.current = true;
+      setIsViewerFullscreen(true);
+      setShowViewerControls(false);
+    };
+    const handleNativeViewerEnd = () => {
+      nativeViewerFullscreenRef.current = false;
+      setIsViewerFullscreen(false);
+      setShowViewerControls(true);
+    };
     const handleFullscreenChange = () => {
-      const hostFullscreen = document.fullscreenElement === hostStageRef.current;
-      const viewerFullscreen = document.fullscreenElement === viewerStageRef.current;
+      const hostFullscreen =
+        nativeHostFullscreenRef.current ||
+        document.fullscreenElement === hostStageRef.current ||
+        document.fullscreenElement === hostVideo;
+      const viewerFullscreen =
+        nativeViewerFullscreenRef.current ||
+        document.fullscreenElement === viewerStageRef.current ||
+        document.fullscreenElement === viewerVideo;
       setIsHostFullscreen(hostFullscreen);
       setIsViewerFullscreen(viewerFullscreen);
       setShowHostControls(!hostFullscreen);
@@ -384,8 +493,16 @@ export default function Home() {
       if (hostControlsTimerRef.current) window.clearTimeout(hostControlsTimerRef.current);
       if (viewerControlsTimerRef.current) window.clearTimeout(viewerControlsTimerRef.current);
     };
+    hostVideo?.addEventListener('webkitbeginfullscreen', handleNativeHostBegin);
+    hostVideo?.addEventListener('webkitendfullscreen', handleNativeHostEnd);
+    viewerVideo?.addEventListener('webkitbeginfullscreen', handleNativeViewerBegin);
+    viewerVideo?.addEventListener('webkitendfullscreen', handleNativeViewerEnd);
     document.addEventListener('fullscreenchange', handleFullscreenChange);
     return () => {
+      hostVideo?.removeEventListener('webkitbeginfullscreen', handleNativeHostBegin);
+      hostVideo?.removeEventListener('webkitendfullscreen', handleNativeHostEnd);
+      viewerVideo?.removeEventListener('webkitbeginfullscreen', handleNativeViewerBegin);
+      viewerVideo?.removeEventListener('webkitendfullscreen', handleNativeViewerEnd);
       document.removeEventListener('fullscreenchange', handleFullscreenChange);
       if (hostControlsTimerRef.current) window.clearTimeout(hostControlsTimerRef.current);
       if (viewerControlsTimerRef.current) window.clearTimeout(viewerControlsTimerRef.current);
@@ -584,7 +701,7 @@ export default function Home() {
                         <Button size="icon" variant="outline" onClick={() => void copyLink()} aria-label="송출 링크 복사" className="shrink-0 rounded-xl">{copied ? <Check /> : <Copy />}</Button>
                       </div>
                       <div className="flex items-center justify-between text-xs text-muted-foreground">
-                        <span className="flex items-center gap-2"><Users className="size-3.5" /> {viewerCount}/2명 연결</span>
+                        <span className="flex items-center gap-2"><Users className="size-3.5" /> {viewerCount}/5명 연결</span>
                         <button type="button" onClick={stopPreview} className="transition-colors hover:text-foreground">송출 종료</button>
                       </div>
                     </div>

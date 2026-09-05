@@ -1,14 +1,14 @@
 import { getDatabase } from '@/db';
 
 const ROOM_TTL_SECONDS = 6 * 60 * 60;
-const PEER_TTL_SECONDS = 45;
-const MAX_VIEWERS = 2;
+const PEER_TTL_SECONDS = 30;
+const MAX_VIEWERS = 5;
 const idPattern = /^[a-zA-Z0-9_-]{8,80}$/;
 
 type RoomPayload = {
   roomId?: string;
   peerId?: string;
-  role?: 'host' | 'viewer';
+  role?: 'host' | 'viewer' | 'leave';
 };
 
 function isValidId(value: unknown): value is string {
@@ -30,6 +30,31 @@ async function cleanExpiredRows(now: number) {
     database.prepare('DELETE FROM peers WHERE last_seen_at < ?').bind(now - PEER_TTL_SECONDS),
     database.prepare('DELETE FROM rooms WHERE expires_at < ?').bind(now),
   ]);
+}
+
+async function removePeer(roomId: string, peerId: string) {
+  const database = getDatabase();
+  const room = await database
+    .prepare('SELECT host_id AS hostId FROM rooms WHERE id = ?')
+    .bind(roomId)
+    .first<{ hostId: string }>();
+
+  if (room?.hostId === peerId) {
+    await database.prepare('DELETE FROM rooms WHERE id = ?').bind(roomId).run();
+    return;
+  }
+
+  if (room) {
+    await database
+      .prepare("INSERT INTO signals (room_id, sender_id, recipient_id, kind, payload, created_at) VALUES (?, ?, ?, 'leave', '{}', ?)")
+      .bind(roomId, peerId, room.hostId, Math.floor(Date.now() / 1000))
+      .run();
+  }
+
+  await database
+    .prepare('DELETE FROM peers WHERE room_id = ? AND peer_id = ?')
+    .bind(roomId, peerId)
+    .run();
 }
 
 export async function GET(request: Request) {
@@ -59,6 +84,11 @@ export async function POST(request: Request) {
   const database = getDatabase();
   const now = Math.floor(Date.now() / 1000);
   await cleanExpiredRows(now);
+
+  if (body.role === 'leave') {
+    await removePeer(body.roomId, body.peerId);
+    return Response.json({ ok: true });
+  }
 
   if (body.role === 'host') {
     const expiresAt = now + ROOM_TTL_SECONDS;
@@ -150,11 +180,12 @@ export async function PATCH(request: Request) {
     return Response.json({ error: 'invalid_id' }, { status: 400 });
   }
   const now = Math.floor(Date.now() / 1000);
-  await getDatabase()
+  await cleanExpiredRows(now);
+  const result = await getDatabase()
     .prepare('UPDATE peers SET last_seen_at = ? WHERE room_id = ? AND peer_id = ?')
     .bind(now, body.roomId, body.peerId)
     .run();
-  return Response.json({ ok: true });
+  return Response.json({ ok: true, active: result.meta.changes === 1 });
 }
 
 export async function DELETE(request: Request) {
@@ -162,25 +193,6 @@ export async function DELETE(request: Request) {
   if (!isValidId(body.roomId) || !isValidId(body.peerId)) {
     return Response.json({ error: 'invalid_id' }, { status: 400 });
   }
-  const database = getDatabase();
-  const room = await database
-    .prepare('SELECT host_id AS hostId FROM rooms WHERE id = ?')
-    .bind(body.roomId)
-    .first<{ hostId: string }>();
-
-  if (room?.hostId === body.peerId) {
-    await database.prepare('DELETE FROM rooms WHERE id = ?').bind(body.roomId).run();
-  } else {
-    if (room) {
-      await database
-        .prepare("INSERT INTO signals (room_id, sender_id, recipient_id, kind, payload, created_at) VALUES (?, ?, ?, 'leave', '{}', ?)")
-        .bind(body.roomId, body.peerId, room.hostId, Math.floor(Date.now() / 1000))
-        .run();
-    }
-    await database
-      .prepare('DELETE FROM peers WHERE room_id = ? AND peer_id = ?')
-      .bind(body.roomId, body.peerId)
-      .run();
-  }
+  await removePeer(body.roomId, body.peerId);
   return Response.json({ ok: true });
 }

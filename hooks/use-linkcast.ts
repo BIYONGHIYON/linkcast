@@ -33,6 +33,8 @@ const rtcConfiguration: RTCConfiguration = {
 
 const SIGNALING_RETRY_ERROR = '연결 서버에 닿지 못했어요. 다시 연결하고 있습니다.';
 const VIDEO_MAX_BITRATE = 12_000_000;
+const MAX_VIEWERS = 5;
+const HEARTBEAT_INTERVAL_MS = 10_000;
 
 function randomId() {
   return crypto.randomUUID().replaceAll('-', '');
@@ -313,7 +315,7 @@ export function useLinkcast() {
       }
 
       if (signal.kind === 'join' && roleRef.current === 'host') {
-        if (peerConnectionsRef.current.size >= 2 && !peerConnectionsRef.current.has(signal.senderId)) return;
+        if (peerConnectionsRef.current.size >= MAX_VIEWERS && !peerConnectionsRef.current.has(signal.senderId)) return;
         let connection = peerConnectionsRef.current.get(signal.senderId);
         if (connection?.signalingState === 'closed' || connection?.iceConnectionState === 'failed') {
           closePeer(signal.senderId);
@@ -380,6 +382,33 @@ export function useLinkcast() {
     [closePeer, createPeerConnection, flushCandidates, sendSignal],
   );
 
+  const refreshLease = useCallback(async () => {
+    const roomId = roomIdRef.current;
+    const peerId = peerIdRef.current;
+    const role = roleRef.current;
+    if (!roomId || !peerId || !role) return;
+
+    try {
+      const result = await api<{ active: boolean }>('/api/rooms', {
+        method: 'PATCH',
+        body: JSON.stringify({ roomId, peerId }),
+      });
+      if (
+        result.active ||
+        roomIdRef.current !== roomId ||
+        peerIdRef.current !== peerId ||
+        roleRef.current !== role
+      ) return;
+
+      await api('/api/rooms', {
+        method: 'POST',
+        body: JSON.stringify({ roomId, peerId, role }),
+      });
+    } catch {
+      // 다음 heartbeat에서 다시 시도합니다.
+    }
+  }, []);
+
   const stopLoops = useCallback(() => {
     loopGenerationRef.current += 1;
     if (pollingRef.current) window.clearInterval(pollingRef.current);
@@ -433,13 +462,8 @@ export function useLinkcast() {
     };
     void poll();
     pollingRef.current = window.setInterval(() => void poll(), 250);
-    heartbeatRef.current = window.setInterval(() => {
-      void api('/api/rooms', {
-        method: 'PATCH',
-        body: JSON.stringify({ roomId: roomIdRef.current, peerId: peerIdRef.current }),
-      }).catch(() => undefined);
-    }, 15_000);
-  }, [handleSignal, stopLoops]);
+    heartbeatRef.current = window.setInterval(() => void refreshLease(), HEARTBEAT_INTERVAL_MS);
+  }, [handleSignal, refreshLease, stopLoops]);
 
   const leave = useCallback(async () => {
     stopLoops();
@@ -552,21 +576,32 @@ export function useLinkcast() {
       const currentRoom = roomIdRef.current;
       const currentPeer = peerIdRef.current;
       if (currentRoom && currentPeer) {
-        void fetch('/api/rooms', {
-          method: 'DELETE',
-          headers: { 'content-type': 'application/json' },
-          body: JSON.stringify({ roomId: currentRoom, peerId: currentPeer }),
-          keepalive: true,
-        });
+        const body = JSON.stringify({ roomId: currentRoom, peerId: currentPeer, role: 'leave' });
+        const beaconSent =
+          typeof navigator.sendBeacon === 'function' &&
+          navigator.sendBeacon('/api/rooms', new Blob([body], { type: 'application/json' }));
+        if (!beaconSent) {
+          void fetch('/api/rooms', {
+            method: 'DELETE',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify({ roomId: currentRoom, peerId: currentPeer }),
+            keepalive: true,
+          });
+        }
       }
     };
+    const handleVisibilityChange = () => {
+      if (document.visibilityState === 'visible') void refreshLease();
+    };
     window.addEventListener('pagehide', handlePageHide);
+    document.addEventListener('visibilitychange', handleVisibilityChange);
     return () => {
       window.removeEventListener('pagehide', handlePageHide);
+      document.removeEventListener('visibilitychange', handleVisibilityChange);
       stopLoops();
       connections.forEach((connection) => connection.close());
     };
-  }, [stopLoops]);
+  }, [refreshLease, stopLoops]);
 
   return {
     status,
