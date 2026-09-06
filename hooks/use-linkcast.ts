@@ -34,6 +34,7 @@ const rtcConfiguration: RTCConfiguration = {
 const SIGNALING_RETRY_ERROR = '연결 서버에 닿지 못했어요. 다시 연결하고 있습니다.';
 const VIDEO_MAX_BITRATE = 12_000_000;
 const MAX_VIEWERS = 5;
+const SIGNAL_POLL_INTERVAL_MS = 3_000;
 const HEARTBEAT_INTERVAL_MS = 10_000;
 
 function randomId() {
@@ -461,7 +462,7 @@ export function useLinkcast() {
       }
     };
     void poll();
-    pollingRef.current = window.setInterval(() => void poll(), 250);
+    pollingRef.current = window.setInterval(() => void poll(), SIGNAL_POLL_INTERVAL_MS);
     heartbeatRef.current = window.setInterval(() => void refreshLease(), HEARTBEAT_INTERVAL_MS);
   }, [handleSignal, refreshLease, stopLoops]);
 
