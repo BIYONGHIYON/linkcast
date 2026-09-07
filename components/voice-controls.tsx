@@ -10,12 +10,13 @@ import {
   SelectItem,
 } from '@/components/ui/select';
 import type { useVoiceChat } from '@/hooks/use-voice-chat';
+import type { CallParticipant } from '@/hooks/use-call-presence';
 
 export function VoiceControls({
   voice,
   host,
 }: {
-  voice: ReturnType<typeof useVoiceChat>;
+  voice: ReturnType<typeof useVoiceChat> & { participants: CallParticipant[] };
   host: boolean;
 }) {
   const id = host ? 'host-call' : 'viewer-call';
@@ -65,6 +66,14 @@ export function VoiceControls({
             </Button>
           )}
         </div>
+      </div>
+      <div className="mt-3 flex flex-wrap gap-2" aria-label="통화 참가자">
+        {[{ id: 'self', label: '나', enabled: voice.enabled, muted: voice.muted, speaking: voice.speaking }, ...voice.participants].map(person => (
+          <span key={person.id} className={`inline-flex items-center gap-2 rounded-full border px-3 py-2 text-xs ${person.enabled && person.speaking && !person.muted ? 'border-green-500/50 bg-green-500/10' : 'border-border bg-muted/30'}`}>
+            {person.muted ? <MicOff className="size-3" /> : <span className={`size-1.5 rounded-full ${person.enabled ? 'bg-green-500' : 'bg-muted-foreground/40'}`} />}
+            {person.label}<span className="text-muted-foreground">{!person.enabled ? '미참여' : person.muted ? '음소거' : person.speaking ? '말하는 중' : '참여 중'}</span>
+          </span>
+        ))}
       </div>
       {voice.error && (
         <p role="alert" className="mt-3 text-sm text-destructive">
@@ -137,7 +146,7 @@ export function VoiceControls({
                 aria-labelledby={`${id}-device`}
                 className="w-full"
               >
-                <SelectValue />
+                <SelectValue>{voice.device ? voice.devices.find(d => d.deviceId === voice.device)?.label || '선택한 마이크' : '시스템 기본 마이크'}</SelectValue>
               </SelectTrigger>
               <SelectContent>
                 <SelectItem value="default">시스템 기본 마이크</SelectItem>
@@ -156,7 +165,7 @@ export function VoiceControls({
           </div>
         </div>
         <p className="mt-4 text-xs text-muted-foreground">
-          양쪽에서 통화 시작을 눌러주세요. 캡처보드 소리와 별도로 조절됩니다.
+          양쪽에서 통화 시작을 눌러주세요.
           이어폰을 사용하면 소리 울림을 줄일 수 있어요.
         </p>
       </details>

@@ -13,7 +13,7 @@ export function useVoiceChat() {
   const [devices, setDevices] = useState<MediaDeviceInfo[]>([]);
   const [device, setDevice] = useState('');
   const track = useRef<MediaStreamTrack | null>(null);
-  const onTrack = useRef<((track: MediaStreamTrack | null) => void) | null>(
+  const onTrack = useRef<((track: MediaStreamTrack | null) => void | Promise<void>) | null>(
     null,
   );
   const context = useRef<AudioContext | null>(null);
@@ -26,7 +26,7 @@ export function useVoiceChat() {
   const volumeRef = useRef(volume);
   const sensitivityRef = useRef(sensitivity);
   const subscribeTrack = useCallback(
-    (listener: (track: MediaStreamTrack | null) => void) => {
+    (listener: (track: MediaStreamTrack | null) => void | Promise<void>) => {
       onTrack.current = listener;
       return () => {
         if (onTrack.current === listener) onTrack.current = null;
@@ -57,7 +57,7 @@ export function useVoiceChat() {
     raw.current = null;
     track.current?.stop();
     track.current = null;
-    onTrack.current?.(null);
+    void Promise.resolve(onTrack.current?.(null)).catch(() => undefined);
     gate.current?.disconnect();
     gate.current = null;
     sources.current.forEach((s) => s.disconnect());
@@ -109,6 +109,8 @@ export function useVoiceChat() {
         setSpeaking(event.data.speaking);
       };
       const destination = audio.createMediaStreamDestination();
+      // WebAudio destinations default to stereo; the negotiated microphone is mono.
+      destination.channelCount = 1;
       audio
         .createMediaStreamSource(stream)
         .connect(processor)
@@ -121,17 +123,21 @@ export function useVoiceChat() {
       stream.getAudioTracks()[0].onended = () => {
         if (token === generation.current) stop();
       };
-      onTrack.current?.(track.current);
+      try { await onTrack.current?.(track.current); }
+      catch { throw new Error('voice_sender_failed'); }
+      if (token !== generation.current) return;
       setEnabled(true);
       const available = await navigator.mediaDevices
         .enumerateDevices()
         .catch(() => []);
       if (token === generation.current)
         setDevices(available.filter((d) => d.kind === 'audioinput'));
-    } catch {
+    } catch (reason) {
       if (token === generation.current) {
         stop();
-        setError('마이크를 연결하지 못했어요. 권한과 장치를 확인해 주세요.');
+        setError(reason instanceof Error && reason.message === 'voice_sender_failed'
+          ? '마이크 전송을 연결하지 못했어요. 양쪽 페이지를 새로고침하고 새 방에서 다시 시도해 주세요.'
+          : '마이크를 연결하지 못했어요. 권한과 장치를 확인해 주세요.');
       }
     } finally {
       if (token === generation.current) setBusy(false);

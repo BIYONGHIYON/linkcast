@@ -671,7 +671,7 @@ export default function Home() {
                       setSelectedDevice(value as string);
                       if (isPreviewing) void startPreview(value as string, selectedAudio);
                     }} disabled={activeRoom}>
-                      <SelectTrigger id="video-device" className="h-11 w-full rounded-xl px-3"><SelectValue placeholder="캡처보드를 선택하세요" /></SelectTrigger>
+                      <SelectTrigger id="video-device" className="h-11 w-full rounded-xl px-3"><SelectValue placeholder="캡처보드를 선택하세요">{videoDevices.find(d => d.deviceId === selectedDevice)?.label || '캡처보드를 선택하세요'}</SelectValue></SelectTrigger>
                       <SelectContent>
                         {videoDevices.length ? videoDevices.map((device) => <SelectItem key={device.deviceId} value={device.deviceId}>{device.label}</SelectItem>) : <SelectItem value="none" disabled>연결된 장치 없음</SelectItem>}
                       </SelectContent>
@@ -684,7 +684,7 @@ export default function Home() {
                       setSelectedAudio(value as string);
                       if (isPreviewing) void startPreview(selectedDevice, value as string);
                     }} disabled={activeRoom}>
-                      <SelectTrigger id="audio-device" className="h-11 w-full rounded-xl px-3"><Volume2 className="size-4 text-muted-foreground" /><SelectValue placeholder="오디오 입력을 선택하세요" /></SelectTrigger>
+                      <SelectTrigger id="audio-device" className="h-11 w-full rounded-xl px-3"><Volume2 className="size-4 text-muted-foreground" /><SelectValue placeholder="오디오 입력을 선택하세요">{audioDevices.find(d => d.deviceId === selectedAudio)?.label || '오디오 입력을 선택하세요'}</SelectValue></SelectTrigger>
                       <SelectContent>
                         {audioDevices.length ? audioDevices.map((device) => <SelectItem key={device.deviceId} value={device.deviceId}>{device.label}</SelectItem>) : <SelectItem value="none" disabled>연결된 장치 없음</SelectItem>}
                       </SelectContent>

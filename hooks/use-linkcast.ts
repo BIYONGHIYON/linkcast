@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { SignalingSocket } from './signaling-socket';
 import { useVoiceChat } from './use-voice-chat';
+import { useCallPresence } from './use-call-presence';
 
 type Role = 'host' | 'viewer';
 export type LaserPoint = { x: number; y: number };
@@ -46,13 +47,12 @@ function randomId() {
 
 export function useLinkcast() {
   const voice = useVoiceChat();
+  const { participants, register: registerPresence, remove: removePresence, clear: clearPresence } = useCallPresence({ enabled: voice.enabled, muted: voice.muted, speaking: voice.speaking });
   const { attach: attachVoice, remove: removeVoice, stop: stopVoice, track: voiceTrack, subscribeTrack } = voice;
   const voiceTransceivers = useRef(new Map<string, RTCRtpTransceiver>());
   const voiceMids = useRef(new Map<string, string>());
-  useEffect(() => subscribeTrack(next => {
-    voiceTransceivers.current.forEach(transceiver => {
-      void transceiver.sender.replaceTrack(next).catch(() => undefined);
-    });
+  useEffect(() => subscribeTrack(async next => {
+    await Promise.all([...voiceTransceivers.current.values()].map(transceiver => transceiver.sender.replaceTrack(next)));
   }), [subscribeTrack]);
   const transportRef = useRef<SignalingSocket | null>(null);
   const [status, setStatus] = useState<ConnectionStatus>('idle');
@@ -126,6 +126,7 @@ export function useLinkcast() {
   }, []);
 
   const closePeer = useCallback((peerId: string) => {
+    removePresence(peerId);
     removeVoice(peerId);
     voiceTransceivers.current.delete(peerId);
     voiceMids.current.delete(peerId);
@@ -147,7 +148,7 @@ export function useLinkcast() {
       setRemoteStream(null);
     }
     setViewerCount(peerConnectionsRef.current.size);
-  }, [removeVoice]);
+  }, [removeVoice, removePresence]);
 
   const scheduleViewerReconnect = useCallback(
     (remotePeerId: string) => {
@@ -211,6 +212,7 @@ export function useLinkcast() {
 
       const connection = new RTCPeerConnection(rtcConfiguration);
       peerConnectionsRef.current.set(remotePeerId, connection);
+      registerPresence(remotePeerId, connection, roleRef.current === 'host', peerIdRef.current);
       // Completed strokes need brief loss recovery; this is a retry deadline, not a send delay.
       const channel = connection.createDataChannel('laser', { negotiated: true, id: 0, ordered: false, maxPacketLifeTime: 500 });
       laserChannels.current.set(remotePeerId, channel);
@@ -328,7 +330,7 @@ export function useLinkcast() {
 
       return connection;
     },
-    [attachVoice, voiceTrack, broadcastLaserStroke, closePeer, scheduleViewerReconnect, sendSignal],
+    [registerPresence, attachVoice, voiceTrack, broadcastLaserStroke, closePeer, scheduleViewerReconnect, sendSignal],
   );
 
   const handleSignal = useCallback(
@@ -501,6 +503,7 @@ export function useLinkcast() {
   }, [handleSignal, stopLoops]);
 
   const leave = useCallback(async () => {
+    clearPresence();
     stopVoice();
     voiceTransceivers.current.clear();
     voiceMids.current.clear();
@@ -543,7 +546,7 @@ export function useLinkcast() {
         keepalive: true,
       }).catch(() => undefined);
     }
-  }, [api, stopLoops, stopVoice, removeVoice]);
+  }, [api, stopLoops, stopVoice, removeVoice, clearPresence]);
 
   const createRoom = useCallback(
     async (stream: MediaStream) => {
@@ -632,7 +635,7 @@ export function useLinkcast() {
   }, [refreshLease, stopLoops, stopVoice]);
 
   return {
-    voice,
+    voice: { ...voice, participants },
     laserStroke,
     sendLaserStroke,
     status,
