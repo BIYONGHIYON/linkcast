@@ -36,6 +36,7 @@ export function useVoiceChat() {
   const output = useRef<GainNode | null>(null);
   const receivers = useRef(new Map<string, MediaStreamTrack>());
   const sources = useRef(new Map<string, MediaStreamAudioSourceNode>());
+  const players = useRef(new Map<string, HTMLAudioElement>());
   const generation = useRef(0);
   const volumeRef = useRef(volume);
   const sensitivityRef = useRef(sensitivity);
@@ -45,6 +46,9 @@ export function useVoiceChat() {
     const audio = context.current as SinkableAudioContext | null;
     const sink = (element as (HTMLMediaElement & { sinkId?: string }) | null)?.sinkId || '';
     if (audio?.setSinkId) void audio.setSinkId(sink).catch(() => undefined);
+    players.current.forEach(player => {
+      if (typeof player.setSinkId === 'function') void player.setSinkId(sink).catch(() => undefined);
+    });
   }, []);
 
   const resumePlayback = useCallback(async () => {
@@ -55,7 +59,9 @@ export function useVoiceChat() {
     }
 
     try {
-      await audio.resume();
+      // Start media playback before the first await to retain user activation.
+      const playing = Promise.all([...players.current.values()].map(player => player.play()));
+      await Promise.all([audio.resume(), playing]);
       const sink = (videoOutput.current as (HTMLMediaElement & { sinkId?: string }) | null)?.sinkId || '';
       const sinkable = audio as SinkableAudioContext;
       // AudioContext.setSinkId is not supported everywhere. If copying the
@@ -64,6 +70,8 @@ export function useVoiceChat() {
       if (typeof sinkable.setSinkId === 'function') {
         await sinkable.setSinkId(sink).catch(() => undefined);
       }
+      await Promise.all([...players.current.values()].map(player =>
+        typeof player.setSinkId === 'function' ? player.setSinkId(sink).catch(() => undefined) : Promise.resolve()));
       if (audio.state !== 'running') throw new Error('audio_context_suspended');
       setPlaybackBlocked(false);
     } catch {
@@ -82,7 +90,11 @@ export function useVoiceChat() {
   );
 
   const attach = useCallback((id: string, incoming: MediaStreamTrack) => {
+    if (receivers.current.get(id) === incoming && players.current.has(id)) return;
     receivers.current.set(id, incoming);
+    const previous = players.current.get(id);
+    if (previous) { previous.pause(); previous.srcObject = null; previous.remove(); }
+    players.current.delete(id);
     sources.current.get(id)?.disconnect();
     sources.current.delete(id);
     if (!context.current || !output.current || incoming.kind !== 'audio' || incoming.readyState === 'ended') {
@@ -90,16 +102,29 @@ export function useVoiceChat() {
     }
     incoming.enabled = true;
 
-    // Play remote voice directly through the active AudioContext. The old
-    // MediaStreamDestination -> detached <audio> path could be blocked or
-    // remain silent even while the speaking data-channel state worked.
-    const source = context.current.createMediaStreamSource(new MediaStream([incoming]));
+    // Render the original remote stream, not a re-synthesized destination
+    // stream. Native media playback is the primary path; Web Audio only
+    // supplies gain above 100%, so normal playback does not depend on it.
+    const stream = new MediaStream([incoming]);
+    const player = new Audio();
+    player.autoplay = true;
+    player.setAttribute('playsinline', '');
+    player.hidden = true;
+    player.volume = Math.min(1, volumeRef.current / 100);
+    player.muted = volumeRef.current === 0;
+    player.srcObject = stream;
+    document.body.appendChild(player);
+    players.current.set(id, player);
+    const source = context.current.createMediaStreamSource(stream);
     source.connect(output.current);
     sources.current.set(id, source);
-    if (context.current.state !== 'running') void resumePlayback();
+    void resumePlayback();
   }, [resumePlayback]);
 
   const remove = useCallback((id: string) => {
+    const player = players.current.get(id);
+    if (player) { player.pause(); player.srcObject = null; player.remove(); }
+    players.current.delete(id);
     sources.current.get(id)?.disconnect();
     sources.current.delete(id);
     receivers.current.delete(id);
@@ -116,6 +141,8 @@ export function useVoiceChat() {
     void Promise.resolve(onTrack.current?.(null)).catch(() => undefined);
     sources.current.forEach((source) => source.disconnect());
     sources.current.clear();
+    players.current.forEach(player => { player.pause(); player.srcObject = null; player.remove(); });
+    players.current.clear();
     inputGraph.current.forEach((node) => node.disconnect());
     inputGraph.current = [];
     analyser.current = null;
@@ -142,7 +169,7 @@ export function useVoiceChat() {
       const audio = new AudioContext({ latencyHint: 'interactive' });
       context.current = audio;
       output.current = audio.createGain();
-      output.current.gain.value = volumeRef.current / 100;
+      output.current.gain.value = Math.max(0, volumeRef.current / 100 - 1);
       output.current.connect(audio.destination);
       inputGraph.current = [output.current];
 
@@ -249,7 +276,11 @@ export function useVoiceChat() {
 
   useEffect(() => {
     volumeRef.current = volume;
-    if (output.current) output.current.gain.value = volume / 100;
+    if (output.current) output.current.gain.value = Math.max(0, volume / 100 - 1);
+    players.current.forEach(player => {
+      player.volume = Math.min(1, volume / 100);
+      player.muted = volume === 0;
+    });
   }, [volume]);
 
   useEffect(() => {

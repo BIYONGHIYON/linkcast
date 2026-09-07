@@ -33,12 +33,15 @@ function setup() {
   const exports = {};
   const playback = [];
   runInNewContext(compiled, { exports, require: () => hooks, AudioContext,
+    MediaStream: class { constructor(tracks) { this.tracks = tracks; } },
+    document: { body: { appendChild(element) { element.connected = true; } } },
     window: { setInterval: () => 1, clearInterval() {} },
     Audio: class {
       constructor() { playback.push(this); }
       setAttribute() {}
       play() { this.played = true; return Promise.resolve(); }
       pause() { this.paused = true; }
+      remove() { this.connected = false; }
       setSinkId(id) { this.sinkId = id; return Promise.resolve(); }
     },
     AudioWorkletNode: class { parameters = new Map([['threshold', { value: 0 }]]); port = {}; disconnect() {} connect(target) { return target; } },
@@ -55,7 +58,28 @@ function setup() {
   assert.ok(published);
   assert.equal(state[0], true, 'show joined only after sender accepts track');
   assert.equal(playback.length, 0, 'voice output does not depend on a detached audio element');
+  const incoming = { kind: 'audio', readyState: 'live', enabled: true };
+  voice.attach('peer', incoming);
+  await voice.resumePlayback();
+  assert.equal(playback.length, 1);
+  assert.equal(playback[0].srcObject.tracks[0], incoming, 'native player receives original remote track');
+  assert.equal(playback[0].connected, true);
+  assert.equal(playback[0].played, true);
+  assert.equal(playback[0].sinkId, 'same-as-video-output');
+  voice.attach('peer', incoming);
+  assert.equal(playback.length, 1, 'duplicate ontrack does not interrupt playback');
+  voice.remove('peer');
+  assert.equal(playback[0].srcObject, null);
+  assert.equal(playback[0].connected, false);
+  voice.attach('peer', incoming);
+  playback[1].play = () => Promise.reject(new Error('NotAllowedError'));
+  await voice.resumePlayback();
+  assert.equal(state[8], true, 'autoplay rejection exposes the playback unlock control');
+  playback[1].play = () => Promise.resolve();
+  await voice.resumePlayback();
+  assert.equal(state[8], false, 'explicit playback retry clears blocked state');
   voice.stop();
+  assert.equal(playback[1].srcObject, null);
   assert.equal(microphone.stopped, true);
   assert.equal(published, null);
 }

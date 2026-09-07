@@ -361,8 +361,7 @@ export function useLinkcast() {
             event.track.kind === 'audio' &&
             (event.transceiver === voiceTransceiver ||
               event.transceiver.mid === voiceMids.current.get(remotePeerId) ||
-              event.transceiver.currentDirection === 'sendrecv' ||
-              event.transceiver.direction === 'sendrecv')
+              event.transceiver === findVoiceTransceiver(connection, voiceMids.current.get(remotePeerId)))
           ) {
             attachVoice(remotePeerId, event.track);
             return;
