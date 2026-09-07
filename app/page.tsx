@@ -30,6 +30,7 @@ import {
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { useLinkcast } from '@/hooks/use-linkcast';
 import { LaserOverlay } from '@/components/laser-overlay';
+import { normalizeRoomValue } from '@/lib/room-input';
 
 type DeviceOption = { deviceId: string; label: string };
 type CaptureInfo = { width?: number; height?: number; frameRate?: number };
@@ -66,11 +67,6 @@ async function requestFullscreenWithFallback(stage: HTMLElement, _video: HTMLVid
   return 'viewport';
 }
 
-function normalizeRoomValue(value: string) {
-  const match = value.match(/[?&]room=([^&]+)/);
-  return (match ? decodeURIComponent(match[1]) : value).trim();
-}
-
 function statusLabel(status: ReturnType<typeof useLinkcast>['status']) {
   switch (status) {
     case 'creating':
@@ -103,6 +99,7 @@ export default function Home() {
   const viewerControlsTimerRef = useRef<number | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
   const autoJoinRef = useRef('');
+  const joiningRef = useRef<Promise<boolean> | null>(null);
   const [mode, setMode] = useState<'host' | 'viewer'>('host');
   const [videoDevices, setVideoDevices] = useState<DeviceOption[]>([]);
   const [audioDevices, setAudioDevices] = useState<DeviceOption[]>([]);
@@ -239,30 +236,36 @@ export default function Home() {
     async (value: string) => {
       const normalized = normalizeRoomValue(value);
       if (!normalized) return false;
+      if (joiningRef.current) return joiningRef.current;
       setJoinValue(normalized);
       setMode('viewer');
-      window.history.replaceState(
-        null,
-        '',
-        `/?room=${encodeURIComponent(normalized)}&mode=viewer`,
-      );
-      return joinRoom(normalized);
+      autoJoinRef.current = normalized;
+      // Joining must not also trigger router navigation and effect cleanup.
+      const pending = joinRoom(normalized);
+      joiningRef.current = pending;
+      void pending.finally(() => {
+        if (joiningRef.current === pending) joiningRef.current = null;
+      }).catch(() => undefined);
+      return pending;
     },
     [joinRoom],
   );
 
   useEffect(() => {
-    const params = new URLSearchParams(window.location.search);
-    const requestedRoom = params.get('room') || '';
-    if (requestedRoom && autoJoinRef.current !== requestedRoom) {
-      autoJoinRef.current = requestedRoom;
-      window.setTimeout(() => void connectViewer(requestedRoom), 0);
-    }
-    window.setTimeout(() => void refreshDevices(), 0);
+    const requestedRoom = normalizeRoomValue(window.location.href);
+    const timer = window.setTimeout(() => {
+      if (requestedRoom && autoJoinRef.current !== requestedRoom) void connectViewer(requestedRoom);
+    }, 0);
+    return () => window.clearTimeout(timer);
+  }, [connectViewer]);
+
+  useEffect(() => {
+    const timer = window.setTimeout(() => void refreshDevices(), 0);
     return () => {
+      window.clearTimeout(timer);
       streamRef.current?.getTracks().forEach((track) => track.stop());
     };
-  }, [connectViewer, refreshDevices]);
+  }, [refreshDevices]);
 
   useEffect(() => {
     const video = viewerVideoRef.current;
@@ -273,7 +276,7 @@ export default function Home() {
     setViewerAspectRatio(null);
     video.onplaying = () => {
       setViewerVideoReady(true);
-      setPlaybackBlocked(false);
+      setPlaybackBlocked(video.muted);
     };
 
     if (!remoteStream) {
@@ -285,10 +288,14 @@ export default function Home() {
       void video.play().catch((reason: unknown) => {
         if (reason instanceof DOMException && reason.name === 'NotAllowedError') {
           setPlaybackBlocked(true);
+          // A shared link has no user gesture: show video immediately, then unlock audio on tap.
+          video.muted = true;
+          void video.play().catch(() => undefined);
         }
       });
     };
 
+    video.muted = false;
     video.srcObject = remoteStream;
     video.onloadedmetadata = () => {
       if (video.videoWidth && video.videoHeight) {
@@ -747,7 +754,12 @@ export default function Home() {
                 )}
                 {playbackBlocked && (!isViewerFullscreen || showViewerControls) && (
                   <div className="absolute inset-x-0 bottom-6 flex justify-center">
-                    <Button onClick={() => void viewerVideoRef.current?.play().then(() => setPlaybackBlocked(false))} className="h-11 rounded-full bg-white px-5 text-[#0b0d0f] hover:bg-white/90"><Volume2 /> 소리와 함께 재생</Button>
+                    <Button onClick={() => {
+                      const video = viewerVideoRef.current;
+                      if (!video) return;
+                      video.muted = false;
+                      void video.play().then(() => setPlaybackBlocked(false)).catch(() => setPlaybackBlocked(true));
+                    }} className="h-11 rounded-full bg-white px-5 text-[#0b0d0f] hover:bg-white/90"><Volume2 /> 소리와 함께 재생</Button>
                   </div>
                 )}
               </section>
