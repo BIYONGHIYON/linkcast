@@ -24,43 +24,48 @@ export function LaserOverlay({ ratio, stroke, onSend }: { ratio: number; stroke:
     const timer = window.setTimeout(() => setExpiredId(stroke?.id || null), 2500);
     return () => window.clearTimeout(timer);
   }, [stroke]);
-  const point = (event: PointerEvent<SVGSVGElement>): LaserPoint => {
-    const rect = event.currentTarget.getBoundingClientRect();
+  const point = (event: { clientX: number; clientY: number }, element: SVGSVGElement): LaserPoint => {
+    const rect = element.getBoundingClientRect();
     return { x: Math.max(0, Math.min(1, (event.clientX - rect.left) / rect.width)), y: Math.max(0, Math.min(1, (event.clientY - rect.top) / rect.height)) };
   };
   const append = (event: PointerEvent<SVGSVGElement>) => {
     const current = active.current;
     if (!current || current.pointerId !== event.pointerId) return;
-    if (current.points.length >= 512) current.points = current.points.filter((_, i) => i % 2 === 0);
-    current.points.push(point(event));
+    event.preventDefault();
+    const coalesced = (event.nativeEvent as unknown as { getCoalescedEvents?: () => Array<{ clientX: number; clientY: number }> }).getCoalescedEvents?.() || [];
+    const samples = [...coalesced, event];
+    for (const sample of samples) {
+      if (current.points.length >= 512) current.points = current.points.filter((_, i) => i % 2 === 0);
+      current.points.push(point(sample, event.currentTarget));
+    }
     setDraft([...current.points]);
   };
-  const draw = (points: LaserPoint[], color: string) => points.length > 0 && <g stroke={color} fill={color}>
-    <polyline points={points.map(p => `${p.x * size.width},${p.y * size.height}`).join(' ')} fill="none" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round" />
-    <circle cx={points[points.length - 1].x * size.width} cy={points[points.length - 1].y * size.height} r="5" />
+  const draw = (points: LaserPoint[]) => points.length > 0 && <g fill="none" strokeLinecap="round" strokeLinejoin="round">
+    <polyline points={points.map(p => `${p.x * size.width},${p.y * size.height}`).join(' ')} stroke="#ed1c2e" strokeWidth="8" />
+    <polyline points={points.map(p => `${p.x * size.width},${p.y * size.height}`).join(' ')} stroke="#ffffff" strokeWidth="3.5" />
   </g>;
   return <div ref={root} className="pointer-events-none absolute inset-0 flex items-center justify-center">
-    <svg aria-label="누른 채 그린 후 손을 떼면 포인터 공유" className="pointer-events-auto touch-none select-none" style={{ width: size.width, height: size.height }}
+    <svg aria-label="누른 채 그린 후 손을 떼면 포인터 공유" className="pointer-events-auto touch-none select-none" style={{ width: size.width, height: size.height, touchAction: 'none', userSelect: 'none' }} viewBox={`0 0 ${size.width} ${size.height}`} 
       onContextMenu={event => event.preventDefault()}
       onPointerDown={event => {
-        if (active.current || event.button !== 0) return;
+        if (active.current || (event.pointerType === 'mouse' && event.button !== 0)) return;
         event.preventDefault();
-        event.currentTarget.setPointerCapture(event.pointerId);
-        active.current = { pointerId: event.pointerId, points: [point(event)] };
+        try { event.currentTarget.setPointerCapture(event.pointerId); } catch { return; }
+        active.current = { pointerId: event.pointerId, points: [point(event, event.currentTarget)] };
         setDraft([...active.current.points]);
       }}
       onPointerMove={append}
       onPointerUp={event => {
         if (active.current?.pointerId !== event.pointerId) return;
         append(event);
-        onSend(active.current.points);
+        onSend(active.current.points.slice());
         active.current = null;
         setDraft([]);
       }}
       onPointerCancel={() => { active.current = null; setDraft([]); }}
       onLostPointerCapture={() => { active.current = null; setDraft([]); }}>
-      {visible && draw(visible.points, '#ff4d64')}
-      {draw(draft, '#ffda70')}
+      {visible && draw(visible.points)}
+      {draw(draft)}
     </svg>
   </div>;
 }

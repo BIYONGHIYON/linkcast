@@ -49,9 +49,10 @@ export class LinkcastRoom extends DurableObject<unknown> {
     return this.ctx.blockConcurrencyWhile(async () => {
       await this.sweep();
       const hostId = await this.ctx.storage.get<string>('host');
+      const hostGone = await this.ctx.storage.get<number>('hostGone');
       let error = '';
       if (role === 'host' && hostId && hostId !== id) error = 'room_forbidden';
-      if (role === 'viewer' && !this.peers().some(ws => this.peer(ws).role === 'host')) error = 'room_offline';
+      if (role === 'viewer' && (!hostId || (hostGone && Date.now() - hostGone >= LEASE_MS))) error = 'room_offline';
       const existing = this.peers().find(ws => this.peer(ws).id === id);
       if (role === 'viewer' && !existing && this.peers().filter(ws => this.peer(ws).role === 'viewer').length >= 5) error = 'room_full';
       const pair = new WebSocketPair();
