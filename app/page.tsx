@@ -56,6 +56,7 @@ type WebkitFullscreenVideo = HTMLVideoElement & {
 };
 
 type PictureInPictureVideo = HTMLVideoElement & {
+  autoPictureInPicture?: boolean;
   webkitPresentationMode?: string;
   webkitSetPresentationMode?: (mode: 'inline' | 'picture-in-picture') => void;
   webkitSupportsPresentationMode?: (mode: string) => boolean;
@@ -109,13 +110,37 @@ async function writeClipboardText(value: string) {
   if (!copied) throw new Error('clipboard_unavailable');
 }
 
-async function requestFullscreenWithFallback(stage: HTMLElement, _video: HTMLVideoElement | null) {
+async function requestFullscreenWithFallback(stage: HTMLElement, video: HTMLVideoElement | null) {
+  const nativeVideo = video as WebkitFullscreenVideo | null;
+
+  // iPhone Safari does not support element fullscreen for arbitrary containers.
+  // Its native video fullscreen is the only reliable way to hide the address bar.
+  if (typeof nativeVideo?.webkitEnterFullscreen === 'function') {
+    try {
+      nativeVideo.webkitEnterFullscreen();
+      return 'native-video';
+    } catch {
+      // Continue with the standard fullscreen API or the viewport fallback.
+    }
+  }
+
   if (typeof stage.requestFullscreen === 'function') {
     try {
       await stage.requestFullscreen();
       return 'document';
     } catch {
       // Keep overlays available through a viewport-filling fallback.
+    }
+  }
+
+  // Some mobile browsers reject fullscreen on a nested element but allow the
+  // document root. This also gives the browser a chance to collapse its URL bar.
+  if (typeof document.documentElement.requestFullscreen === 'function') {
+    try {
+      await document.documentElement.requestFullscreen();
+      return 'document';
+    } catch {
+      // The browser may not allow root fullscreen from this browsing context.
     }
   }
 
@@ -151,6 +176,7 @@ export default function Home() {
   const viewerStageRef = useRef<HTMLElement>(null);
   const nativeHostFullscreenRef = useRef(false);
   const nativeViewerFullscreenRef = useRef(false);
+  const viewerAutoPipAttemptRef = useRef(false);
   const hostControlsTimerRef = useRef<number | null>(null);
   const viewerControlsTimerRef = useRef<number | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
@@ -229,6 +255,42 @@ export default function Home() {
     }
   }, []);
 
+  const enterViewerPictureInPicture = useCallback(async () => {
+    const video = viewerVideoRef.current as PictureInPictureVideo | null;
+    const pictureInPictureDocument = document as PictureInPictureDocument;
+    if (!video || !remoteStream || !viewerVideoReady) return false;
+
+    if (
+      pictureInPictureDocument.pictureInPictureElement === video ||
+      video.webkitPresentationMode === 'picture-in-picture'
+    ) {
+      setIsViewerPip(true);
+      return true;
+    }
+
+    // iOS Safari's WebKit presentation API can handle a MediaStream video even
+    // where the standard requestPictureInPicture API is unavailable.
+    if (
+      video.webkitSupportsPresentationMode?.('picture-in-picture') === true &&
+      typeof video.webkitSetPresentationMode === 'function'
+    ) {
+      video.webkitSetPresentationMode('picture-in-picture');
+      setIsViewerPip(true);
+      return true;
+    }
+
+    if (
+      typeof video.requestPictureInPicture === 'function' &&
+      pictureInPictureDocument.pictureInPictureEnabled !== false
+    ) {
+      await video.requestPictureInPicture();
+      setIsViewerPip(true);
+      return true;
+    }
+
+    return false;
+  }, [remoteStream, viewerVideoReady]);
+
   const toggleViewerPictureInPicture = useCallback(async () => {
     const video = viewerVideoRef.current as PictureInPictureVideo | null;
     const pictureInPictureDocument = document as PictureInPictureDocument;
@@ -245,31 +307,11 @@ export default function Home() {
         return;
       }
 
-      // iOS Safari exposes this WebKit presentation API alongside or before
-      // the standard API. Prefer it for MediaStream-backed video.
-      if (
-        video.webkitSupportsPresentationMode?.('picture-in-picture') === true &&
-        typeof video.webkitSetPresentationMode === 'function'
-      ) {
-        video.webkitSetPresentationMode('picture-in-picture');
-        setIsViewerPip(true);
-        return;
-      }
-
-      if (
-        typeof video.requestPictureInPicture === 'function' &&
-        pictureInPictureDocument.pictureInPictureEnabled !== false
-      ) {
-        await video.requestPictureInPicture();
-        setIsViewerPip(true);
-        return;
-      }
-
-      throw new Error('picture_in_picture_unsupported');
+      if (!(await enterViewerPictureInPicture())) throw new Error('picture_in_picture_unsupported');
     } catch {
       setViewerPipError('이 브라우저에서는 PiP를 시작할 수 없어요. Safari 또는 Chrome 최신 버전을 사용해 주세요.');
     }
-  }, [exitViewerPictureInPicture, remoteStream, viewerVideoReady]);
+  }, [enterViewerPictureInPicture, exitViewerPictureInPicture, remoteStream, viewerVideoReady]);
 
   const stopPreview = useCallback(() => {
     void leave();
@@ -471,6 +513,50 @@ export default function Home() {
     const video = viewerVideoRef.current as PictureInPictureVideo | null;
     if (!video) return;
 
+    viewerAutoPipAttemptRef.current = false;
+
+    // Chromium can enter PiP automatically when the page is backgrounded.
+    // Keep this as a hint; unsupported browsers simply ignore the property.
+    if ('autoPictureInPicture' in video) {
+      video.autoPictureInPicture = Boolean(remoteStream && viewerVideoReady);
+    }
+
+    const requestAutomaticPictureInPicture = (event?: Event) => {
+      if (
+        (document.visibilityState !== 'hidden' && event?.type !== 'pagehide') ||
+        !remoteStream ||
+        !viewerVideoReady ||
+        isViewerFullscreen ||
+        nativeViewerFullscreenRef.current ||
+        viewerAutoPipAttemptRef.current
+      ) {
+        return;
+      }
+
+      // requestPictureInPicture normally needs a user gesture. This best-effort
+      // attempt is intentionally silent when the browser rejects background PiP.
+      viewerAutoPipAttemptRef.current = true;
+      void enterViewerPictureInPicture().catch(() => undefined);
+    };
+    const resetAutomaticPictureInPictureAttempt = () => {
+      if (document.visibilityState === 'visible') viewerAutoPipAttemptRef.current = false;
+    };
+
+    document.addEventListener('visibilitychange', requestAutomaticPictureInPicture);
+    document.addEventListener('visibilitychange', resetAutomaticPictureInPictureAttempt);
+    window.addEventListener('pagehide', requestAutomaticPictureInPicture);
+    return () => {
+      document.removeEventListener('visibilitychange', requestAutomaticPictureInPicture);
+      document.removeEventListener('visibilitychange', resetAutomaticPictureInPictureAttempt);
+      window.removeEventListener('pagehide', requestAutomaticPictureInPicture);
+      if ('autoPictureInPicture' in video) video.autoPictureInPicture = false;
+    };
+  }, [enterViewerPictureInPicture, isViewerFullscreen, remoteStream, viewerVideoReady]);
+
+  useEffect(() => {
+    const video = viewerVideoRef.current as PictureInPictureVideo | null;
+    if (!video) return;
+
     const updatePictureInPictureState = () => {
       const pictureInPictureDocument = document as PictureInPictureDocument;
       setIsViewerPip(
@@ -625,7 +711,7 @@ export default function Home() {
       }
       setShowHostControls(false);
       const fullscreenMode = await requestFullscreenWithFallback(stage, video);
-      if (fullscreenMode === 'viewport') {
+      if (fullscreenMode === 'native-video' || fullscreenMode === 'viewport') {
         nativeHostFullscreenRef.current = true;
         setIsHostFullscreen(true);
       } else if (!fullscreenMode) {
@@ -665,7 +751,7 @@ export default function Home() {
       }
       setShowViewerControls(false);
       const fullscreenMode = await requestFullscreenWithFallback(stage, video);
-      if (fullscreenMode === 'viewport') {
+      if (fullscreenMode === 'native-video' || fullscreenMode === 'viewport') {
         nativeViewerFullscreenRef.current = true;
         setIsViewerFullscreen(true);
       } else if (!fullscreenMode) {
@@ -713,11 +799,13 @@ export default function Home() {
       const hostFullscreen =
         nativeHostFullscreenRef.current ||
         document.fullscreenElement === hostStageRef.current ||
-        document.fullscreenElement === hostVideo;
+        document.fullscreenElement === hostVideo ||
+        (mode === 'host' && document.fullscreenElement === document.documentElement);
       const viewerFullscreen =
         nativeViewerFullscreenRef.current ||
         document.fullscreenElement === viewerStageRef.current ||
-        document.fullscreenElement === viewerVideo;
+        document.fullscreenElement === viewerVideo ||
+        (mode === 'viewer' && document.fullscreenElement === document.documentElement);
       setIsHostFullscreen(hostFullscreen);
       setIsViewerFullscreen(viewerFullscreen);
       setShowHostControls(!hostFullscreen);
@@ -739,7 +827,7 @@ export default function Home() {
       if (hostControlsTimerRef.current) window.clearTimeout(hostControlsTimerRef.current);
       if (viewerControlsTimerRef.current) window.clearTimeout(viewerControlsTimerRef.current);
     };
-  }, []);
+  }, [mode]);
 
   useEffect(() => {
     const context = (document as Document & { modelContext?: ModelContextLike })
