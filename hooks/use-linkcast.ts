@@ -19,7 +19,7 @@ type ConnectionStatus =
 type Signal = {
   id: number;
   senderId: string;
-  kind: 'join' | 'offer' | 'answer' | 'candidate' | 'leave';
+  kind: 'join' | 'leave' | 'offer' | 'answer' | 'candidate' | 'host_lost' | 'host_restart' | 'room_closed';
   payload: string;
 };
 
@@ -85,7 +85,7 @@ export function useLinkcast() {
   const viewerReconnectAttemptsRef = useRef(0);
 
   const sendSignal = useCallback(
-    async (recipientId: string, kind: 'offer' | 'answer' | 'candidate', payload: unknown) => {
+    async (recipientId: string, kind: 'join' | 'offer' | 'answer' | 'candidate', payload: unknown) => {
       const roomId = roomIdRef.current;
       const senderId = peerIdRef.current;
       if (!roomId || !senderId) return;
@@ -330,6 +330,29 @@ export function useLinkcast() {
           setStatus('not-found');
           setError('송출자가 연결을 종료했어요.');
         }
+        return;
+      }
+
+      if (signal.kind === 'host_lost' && roleRef.current === 'viewer') {
+        closePeer(signal.senderId);
+        setStatus('connecting');
+        setError('송출자 연결을 확인하고 있어요.');
+        return;
+      }
+
+      if (signal.kind === 'host_restart' && roleRef.current === 'viewer') {
+        closePeer(signal.senderId);
+        setStatus('connecting');
+        setError('');
+        await sendSignal(signal.senderId, 'join', {});
+        return;
+      }
+
+      if (signal.kind === 'room_closed' && roleRef.current === 'viewer') {
+        closePeer(signal.senderId);
+        transportRef.current?.close();
+        setStatus('not-found');
+        setError('송출자가 연결을 종료했어요.');
         return;
       }
 

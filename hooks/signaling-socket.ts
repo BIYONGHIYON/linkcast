@@ -1,4 +1,4 @@
-export type SocketSignal = { id: number; senderId: string; kind: 'join' | 'leave' | 'offer' | 'answer' | 'candidate'; payload: string };
+export type SocketSignal = { id: number; senderId: string; kind: 'join' | 'leave' | 'offer' | 'answer' | 'candidate' | 'host_lost' | 'host_restart' | 'room_closed'; payload: string };
 
 export class SignalingSocket {
   private socket: WebSocket | null = null;
@@ -53,12 +53,12 @@ export class SignalingSocket {
             }, 30000);
             resolve({ hostId: this.hostId });
           } else if (message.type === 'error') {
-            terminal = message.error !== 'room_offline';
+            terminal = true;
             const error = new Error(message.error); error.name = message.error;
             reject(error);
           } else if (message.type === 'signal') {
             this.emit(message);
-            if (message.kind === 'leave' && session.role === 'viewer' && message.senderId === this.hostId) {
+            if ((message.kind === 'room_closed' || message.kind === 'leave') && session.role === 'viewer' && message.senderId === this.hostId) {
               this.stopped = true;
               if (this.heartbeat) clearInterval(this.heartbeat);
               ws.close();
@@ -72,7 +72,7 @@ export class SignalingSocket {
         if (generation !== this.generation || this.stopped) return;
         if (this.heartbeat) clearInterval(this.heartbeat);
         this.onStatus?.(false);
-        if (!terminal) this.timer = setTimeout(() => void this.connect().catch(() => undefined), Math.min(1000 * 2 ** this.attempts++, 15000) + Math.random() * 500);
+        if (ready && !terminal) this.timer = setTimeout(() => void this.connect().catch(() => undefined), Math.min(1000 * 2 ** this.attempts++, 15000) + Math.random() * 500);
       };
       ws.onerror = () => ws.close();
     });
@@ -93,8 +93,21 @@ export class SignalingSocket {
     this.close();
     this.stopped = false;
     this.session = body;
-    try { return await this.connect() as T; }
+    try { return await this.connectWithRetry() as T; }
     catch (error) { this.close(); throw error; }
+  }
+  private async connectWithRetry(): Promise<{ hostId: string }> {
+    let attempts = 0;
+    while (!this.stopped) {
+      try {
+        return await this.connect();
+      } catch (error) {
+        const name = error instanceof Error ? error.name : '';
+        if (name !== 'room_offline' || this.session?.role !== 'viewer' || attempts >= 7) throw error;
+        await new Promise((resolve) => setTimeout(resolve, Math.min(500 * 2 ** attempts++, 3000)));
+      }
+    }
+    throw new Error('socket_closed');
   }
   resume() {
     if (this.stopped || !this.session) return;

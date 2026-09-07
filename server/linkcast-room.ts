@@ -25,10 +25,19 @@ export class LinkcastRoom extends DurableObject<unknown> {
     try { ws.close(1000, 'Disconnected'); } catch { /* already closed */ }
     if (peer.role === 'viewer') for (const host of this.peers().filter(s => this.peer(s).role === 'host')) this.signal(host, peer.id, 'leave');
   }
-  private sweep() {
+  private async sweep() {
     for (const ws of this.peers()) {
       const lastPing = this.ctx.getWebSocketAutoResponseTimestamp(ws)?.getTime() || 0;
-      if (Date.now() - Math.max(lastPing, this.peer(ws).seen) > LEASE_MS) this.remove(ws);
+      if (Date.now() - Math.max(lastPing, this.peer(ws).seen) > LEASE_MS) {
+        const peer = this.peer(ws);
+        if (peer.role === 'host') {
+          for (const viewer of this.peers().filter((candidate) => this.peer(candidate).role === 'viewer')) {
+            this.signal(viewer, peer.id, 'host_lost');
+          }
+          await this.ctx.storage.put('hostGone', Date.now());
+        }
+        this.remove(ws);
+      }
     }
   }
   async fetch(request: Request) {
@@ -38,7 +47,7 @@ export class LinkcastRoom extends DurableObject<unknown> {
     if (!/^[a-zA-Z0-9_-]{16,80}$/.test(id) || (role !== 'host' && role !== 'viewer')) return new Response('Invalid peer', { status: 400 });
     // Serialize admission, including storage awaits, to enforce the five-viewer limit.
     return this.ctx.blockConcurrencyWhile(async () => {
-      this.sweep();
+      await this.sweep();
       const hostId = await this.ctx.storage.get<string>('host');
       let error = '';
       if (role === 'host' && hostId && hostId !== id) error = 'room_forbidden';
@@ -53,6 +62,7 @@ export class LinkcastRoom extends DurableObject<unknown> {
         server.close(1008, error);
         return new Response(null, { status: 101, webSocket: client });
       }
+      const reconnectingHost = role === 'host' && hostId === id;
       if (role === 'host' && !hostId) await this.ctx.storage.put('host', id);
       if (role === 'host') await this.ctx.storage.delete('hostGone');
       if (existing) this.remove(existing);
@@ -61,8 +71,8 @@ export class LinkcastRoom extends DurableObject<unknown> {
       this.send(server, { type: 'ready', hostId: role === 'host' ? id : hostId });
       if (role === 'viewer') {
         for (const host of this.peers().filter(ws => this.peer(ws).role === 'host')) this.signal(host, id, 'join');
-      } else {
-        for (const viewer of this.peers().filter(ws => this.peer(ws).role === 'viewer')) this.signal(server, this.peer(viewer).id, 'join');
+      } else if (reconnectingHost) {
+        for (const viewer of this.peers().filter((ws) => this.peer(ws).role === 'viewer')) this.signal(viewer, id, 'host_restart');
       }
       if (!(await this.ctx.storage.getAlarm())) await this.ctx.storage.setAlarm(Date.now() + LEASE_MS);
       return new Response(null, { status: 101, webSocket: client });
@@ -76,7 +86,10 @@ export class LinkcastRoom extends DurableObject<unknown> {
       const data = JSON.parse(message);
       if (data.type === 'leave') {
         if (peer.role === 'host') {
-          for (const other of this.peers()) { this.signal(other, peer.id, 'leave'); this.remove(other); }
+          for (const other of this.peers()) {
+            if (this.peer(other).role === 'viewer') this.signal(other, peer.id, 'room_closed');
+            this.remove(other);
+          }
           await this.ctx.storage.deleteAll();
         } else this.remove(ws);
         return;
@@ -92,6 +105,11 @@ export class LinkcastRoom extends DurableObject<unknown> {
   async webSocketClose(ws: WebSocket) {
     const peer = this.peer(ws);
     if (peer.removed) return;
+    if (peer.role === 'host') {
+      for (const viewer of this.peers().filter((candidate) => this.peer(candidate).role === 'viewer')) {
+        this.signal(viewer, peer.id, 'host_lost');
+      }
+    }
     this.remove(ws);
     if (peer.role === 'host') {
       await this.ctx.storage.put('hostGone', Date.now());
@@ -100,7 +118,7 @@ export class LinkcastRoom extends DurableObject<unknown> {
   }
   async webSocketError(ws: WebSocket) { await this.webSocketClose(ws); }
   async alarm() {
-    this.sweep();
+    await this.sweep();
     if (!this.peers().some(ws => this.peer(ws).role === 'host')) {
       const gone = await this.ctx.storage.get<number>('hostGone');
       if (gone && Date.now() - gone < LEASE_MS) {
@@ -108,7 +126,7 @@ export class LinkcastRoom extends DurableObject<unknown> {
         return;
       }
       const host = await this.ctx.storage.get<string>('host');
-      for (const ws of this.peers()) { this.signal(ws, host || '', 'leave'); this.remove(ws); }
+      for (const ws of this.peers()) { this.signal(ws, host || '', 'room_closed'); this.remove(ws); }
       await this.ctx.storage.deleteAll();
     } else await this.ctx.storage.setAlarm(Date.now() + LEASE_MS);
   }
