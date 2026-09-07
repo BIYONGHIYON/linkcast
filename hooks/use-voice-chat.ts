@@ -1,5 +1,14 @@
 'use client';
+
 import { useCallback, useEffect, useRef, useState } from 'react';
+
+type SinkableAudioContext = AudioContext & {
+  setSinkId?: (sinkId: string) => Promise<void>;
+};
+
+function thresholdForSensitivity(value: number) {
+  return 10 ** ((-20 - value * 0.6) / 20);
+}
 
 export function useVoiceChat() {
   const [enabled, setEnabled] = useState(false);
@@ -11,7 +20,6 @@ export function useVoiceChat() {
   const [speaking, setSpeaking] = useState(false);
   const [error, setError] = useState('');
   const [playbackBlocked, setPlaybackBlocked] = useState(false);
-  const player = useRef<HTMLAudioElement | null>(null);
   const videoOutput = useRef<HTMLMediaElement | null>(null);
   const inputGraph = useRef<AudioNode[]>([]);
   const [devices, setDevices] = useState<MediaDeviceInfo[]>([]);
@@ -22,24 +30,44 @@ export function useVoiceChat() {
   );
   const context = useRef<AudioContext | null>(null);
   const raw = useRef<MediaStream | null>(null);
-  const gate = useRef<AudioWorkletNode | null>(null);
+  const analyser = useRef<AnalyserNode | null>(null);
+  const analysisBuffer = useRef<Float32Array<ArrayBuffer> | null>(null);
+  const analysisTimer = useRef<number | null>(null);
   const output = useRef<GainNode | null>(null);
   const receivers = useRef(new Map<string, MediaStreamTrack>());
   const sources = useRef(new Map<string, MediaStreamAudioSourceNode>());
   const generation = useRef(0);
   const volumeRef = useRef(volume);
   const sensitivityRef = useRef(sensitivity);
-  const bindOutputElement = useCallback((element: HTMLMediaElement | null) => { videoOutput.current = element; }, []);
-  const resumePlayback = useCallback(async () => {
-    try {
-      await context.current?.resume();
-      const sink = (videoOutput.current as (HTMLMediaElement & { sinkId?: string }) | null)?.sinkId || '';
-      const audio = player.current as (HTMLAudioElement & { setSinkId?: (id: string) => Promise<void> }) | null;
-      if (audio?.setSinkId) await audio.setSinkId(sink);
-      await audio?.play();
-      setPlaybackBlocked(false);
-    } catch { setPlaybackBlocked(true); }
+
+  const bindOutputElement = useCallback((element: HTMLMediaElement | null) => {
+    videoOutput.current = element;
   }, []);
+
+  const resumePlayback = useCallback(async () => {
+    const audio = context.current;
+    if (!audio) {
+      setPlaybackBlocked(false);
+      return;
+    }
+
+    try {
+      await audio.resume();
+      const sink = (videoOutput.current as (HTMLMediaElement & { sinkId?: string }) | null)?.sinkId || '';
+      const sinkable = audio as SinkableAudioContext;
+      // AudioContext.setSinkId is not supported everywhere. If copying the
+      // video's output device fails, keep the system default instead of
+      // preventing the call audio from playing at all.
+      if (sink && typeof sinkable.setSinkId === 'function') {
+        await sinkable.setSinkId(sink).catch(() => undefined);
+      }
+      if (audio.state !== 'running') throw new Error('audio_context_suspended');
+      setPlaybackBlocked(false);
+    } catch {
+      setPlaybackBlocked(true);
+    }
+  }, []);
+
   const subscribeTrack = useCallback(
     (listener: (track: MediaStreamTrack | null) => void | Promise<void>) => {
       onTrack.current = listener;
@@ -49,36 +77,44 @@ export function useVoiceChat() {
     },
     [],
   );
+
   const attach = useCallback((id: string, incoming: MediaStreamTrack) => {
     receivers.current.set(id, incoming);
     sources.current.get(id)?.disconnect();
     sources.current.delete(id);
-    if (!context.current || !output.current || incoming.readyState === 'ended')
+    if (!context.current || !output.current || incoming.kind !== 'audio' || incoming.readyState === 'ended') {
       return;
-    const source = context.current.createMediaStreamSource(
-      new MediaStream([incoming]),
-    );
+    }
+
+    // Play remote voice directly through the active AudioContext. The old
+    // MediaStreamDestination -> detached <audio> path could be blocked or
+    // remain silent even while the speaking data-channel state worked.
+    const source = context.current.createMediaStreamSource(new MediaStream([incoming]));
     source.connect(output.current);
     sources.current.set(id, source);
   }, []);
+
   const remove = useCallback((id: string) => {
     sources.current.get(id)?.disconnect();
     sources.current.delete(id);
     receivers.current.delete(id);
   }, []);
+
   const stop = useCallback(() => {
     generation.current++;
-    raw.current?.getTracks().forEach((t) => t.stop());
+    if (analysisTimer.current) window.clearInterval(analysisTimer.current);
+    analysisTimer.current = null;
+    raw.current?.getTracks().forEach((current) => current.stop());
     raw.current = null;
     track.current?.stop();
     track.current = null;
     void Promise.resolve(onTrack.current?.(null)).catch(() => undefined);
-    gate.current?.disconnect();
-    gate.current = null;
-    sources.current.forEach((s) => s.disconnect());
+    sources.current.forEach((source) => source.disconnect());
     sources.current.clear();
-    inputGraph.current.forEach(node => node.disconnect()); inputGraph.current = [];
-    if (player.current) { player.current.pause(); player.current.srcObject = null; player.current = null; }
+    inputGraph.current.forEach((node) => node.disconnect());
+    inputGraph.current = [];
+    analyser.current = null;
+    analysisBuffer.current = null;
     void context.current?.close().catch(() => undefined);
     context.current = null;
     output.current = null;
@@ -89,28 +125,27 @@ export function useVoiceChat() {
     setSpeaking(false);
     setPlaybackBlocked(false);
   }, []);
+
   const start = useCallback(async () => {
-    if (context.current) return;
+    if (context.current && context.current.state !== 'closed') return;
+
     const token = ++generation.current;
     setBusy(true);
     setError('');
+
     try {
       const audio = new AudioContext({ latencyHint: 'interactive' });
       context.current = audio;
-      const playbackDestination = audio.createMediaStreamDestination();
       output.current = audio.createGain();
       output.current.gain.value = volumeRef.current / 100;
-      output.current.connect(playbackDestination);
-      const playback = new Audio();
-      playback.setAttribute('playsinline', '');
-      playback.srcObject = playbackDestination.stream;
-      player.current = playback;
-      inputGraph.current = [playbackDestination];
-      // Unlock the media element from the actual call-button gesture, before permission awaits.
-      void playback.play().catch(() => { if (token === generation.current) setPlaybackBlocked(true); });
-      await audio.resume();
+      output.current.connect(audio.destination);
+      inputGraph.current = [output.current];
+
+      // This runs during the call-button gesture, so the AudioContext is
+      // unlocked before a permission prompt or signaling round trip occurs.
       await resumePlayback();
       if (token !== generation.current) return;
+
       const stream = await navigator.mediaDevices.getUserMedia({
         audio: {
           deviceId: device ? { exact: device } : undefined,
@@ -122,43 +157,63 @@ export function useVoiceChat() {
         video: false,
       });
       if (token !== generation.current) {
-        stream.getTracks().forEach((t) => t.stop());
+        stream.getTracks().forEach((current) => current.stop());
         return;
       }
+
+      const microphoneTrack = stream.getAudioTracks()[0];
+      if (!microphoneTrack) throw new Error('microphone_track_missing');
       raw.current = stream;
-      await audio.audioWorklet.addModule('/voice-gate.js');
-      if (token !== generation.current) return;
-      const processor = new AudioWorkletNode(audio, 'voice-gate', {
-        outputChannelCount: [1],
-      });
-      gate.current = processor;
-      processor.parameters.get('threshold')!.value =
-        10 ** ((-20 - sensitivityRef.current * 0.6) / 20);
-      processor.port.onmessage = (event) => {
-        if (token !== generation.current) return;
-        setLevel(Math.min(100, event.data.level * 500));
-        setSpeaking(event.data.speaking);
-      };
-      const destination = audio.createMediaStreamDestination();
-      // WebAudio destinations default to stereo; the negotiated microphone is mono.
-      destination.channelCount = 1;
+
+      // Send the browser's live microphone track directly over WebRTC. The
+      // analyser is only for the local level/speaking indicator and never
+      // sits in the media path, so it cannot accidentally mute the call.
       const microphoneSource = audio.createMediaStreamSource(stream);
-      microphoneSource.connect(processor).connect(destination);
-      inputGraph.current.push(microphoneSource, destination);
-      receivers.current.forEach((t, id) => attach(id, t));
-      track.current = destination.stream.getAudioTracks()[0];
-      stream.getAudioTracks()[0].onended = () => {
+      const meter = audio.createAnalyser();
+      meter.fftSize = 1024;
+      meter.smoothingTimeConstant = 0.2;
+      const silentMonitor = audio.createGain();
+      silentMonitor.gain.value = 0;
+      microphoneSource.connect(meter).connect(silentMonitor).connect(audio.destination);
+      analyser.current = meter;
+      analysisBuffer.current = new Float32Array(
+        new ArrayBuffer(meter.fftSize * Float32Array.BYTES_PER_ELEMENT),
+      );
+      inputGraph.current.push(microphoneSource, meter, silentMonitor);
+
+      const updateMeter = () => {
+        if (token !== generation.current || context.current !== audio || audio.state === 'closed') return;
+        const currentAnalyser = analyser.current;
+        const buffer = analysisBuffer.current;
+        if (!currentAnalyser || !buffer) return;
+        currentAnalyser.getFloatTimeDomainData(buffer);
+        let energy = 0;
+        for (const value of buffer) energy += value * value;
+        const rms = Math.sqrt(energy / buffer.length);
+        const live = microphoneTrack.enabled && microphoneTrack.readyState === 'live';
+        setLevel(live ? Math.min(100, rms * 500) : 0);
+        setSpeaking(live && rms >= thresholdForSensitivity(sensitivityRef.current));
+      };
+      updateMeter();
+      analysisTimer.current = window.setInterval(updateMeter, 50);
+
+      track.current = microphoneTrack;
+      microphoneTrack.onended = () => {
         if (token === generation.current) stop();
       };
-      try { await onTrack.current?.(track.current); }
-      catch { throw new Error('voice_sender_failed'); }
+
+      // Install the track into every already-negotiated voice sender. If the
+      // room has no peer yet, the current track is picked up when a new peer
+      // connection is created.
+      await onTrack.current?.(microphoneTrack);
       if (token !== generation.current) return;
+      receivers.current.forEach((incoming, id) => attach(id, incoming));
       setEnabled(true);
-      const available = await navigator.mediaDevices
-        .enumerateDevices()
-        .catch(() => []);
-      if (token === generation.current)
-        setDevices(available.filter((d) => d.kind === 'audioinput'));
+
+      const available = await navigator.mediaDevices.enumerateDevices().catch(() => []);
+      if (token === generation.current) {
+        setDevices(available.filter((current) => current.kind === 'audioinput'));
+      }
     } catch (reason) {
       if (token === generation.current) {
         stop();
@@ -169,34 +224,33 @@ export function useVoiceChat() {
     } finally {
       if (token === generation.current) setBusy(false);
     }
-  }, [attach, device, stop, resumePlayback]);
+  }, [attach, device, resumePlayback, stop]);
+
   const toggleMute = useCallback(() => {
     setMuted((current) => {
-      raw.current?.getAudioTracks().forEach((t) => {
-        t.enabled = current;
+      raw.current?.getAudioTracks().forEach((currentTrack) => {
+        currentTrack.enabled = current;
       });
+      if (!current) setSpeaking(false);
       return !current;
     });
   }, []);
+
   useEffect(() => {
     volumeRef.current = volume;
     if (output.current) output.current.gain.value = volume / 100;
   }, [volume]);
+
   useEffect(() => {
     sensitivityRef.current = sensitivity;
-    gate.current?.parameters
-      .get('threshold')
-      ?.setValueAtTime(
-        10 ** ((-20 - sensitivity * 0.6) / 20),
-        context.current?.currentTime || 0,
-      );
   }, [sensitivity]);
+
   useEffect(() => {
     let live = true;
     void navigator.mediaDevices
       ?.enumerateDevices()
-      .then((ds) => {
-        if (live) setDevices(ds.filter((d) => d.kind === 'audioinput'));
+      .then((available) => {
+        if (live) setDevices(available.filter((current) => current.kind === 'audioinput'));
       })
       .catch(() => undefined);
     return () => {
@@ -204,6 +258,7 @@ export function useVoiceChat() {
       stop();
     };
   }, [stop]);
+
   return {
     enabled,
     busy,

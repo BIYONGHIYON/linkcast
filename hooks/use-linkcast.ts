@@ -45,6 +45,21 @@ function randomId() {
   return crypto.randomUUID().replaceAll('-', '');
 }
 
+function findVoiceTransceiver(connection: RTCPeerConnection, expectedMid?: string) {
+  if (expectedMid) {
+    const exact = connection.getTransceivers().find((transceiver) => transceiver.mid === expectedMid);
+    if (exact) return exact;
+  }
+
+  // The host creates the capture-audio transceiver before the dedicated
+  // voice transceiver. If a browser drops the auxiliary voiceMid metadata,
+  // the last audio m-line is still the dedicated voice m-line.
+  const audioTransceivers = connection.getTransceivers().filter((transceiver) =>
+    transceiver.receiver.track.kind === 'audio' || transceiver.sender.track?.kind === 'audio',
+  );
+  return audioTransceivers[audioTransceivers.length - 1] || null;
+}
+
 
 export function useLinkcast() {
   const voice = useVoiceChat();
@@ -53,7 +68,8 @@ export function useLinkcast() {
   const voiceTransceivers = useRef(new Map<string, RTCRtpTransceiver>());
   const voiceMids = useRef(new Map<string, string>());
   useEffect(() => subscribeTrack(async next => {
-    await Promise.all([...voiceTransceivers.current.values()].map(transceiver => transceiver.sender.replaceTrack(next)));
+    await Promise.all([...voiceTransceivers.current.values()]
+      .map(transceiver => transceiver.sender.replaceTrack(next)));
   }), [subscribeTrack]);
   const transportRef = useRef<SignalingSocket | null>(null);
   const [status, setStatus] = useState<ConnectionStatus>('idle');
@@ -313,11 +329,17 @@ export function useLinkcast() {
         }
         const transceiver = connection.addTransceiver(voiceTrack.current || 'audio', { direction: 'sendrecv' });
         voiceTransceivers.current.set(remotePeerId, transceiver);
-        connection.ontrack = event => attachVoice(remotePeerId, event.track);
+        connection.ontrack = event => {
+          if (event.track.kind === 'audio') attachVoice(remotePeerId, event.track);
+        };
         setViewerCount(peerConnectionsRef.current.size);
       } else {
         connection.ontrack = (event) => {
-          if (event.transceiver.mid === voiceMids.current.get(remotePeerId)) {
+          const voiceTransceiver = voiceTransceivers.current.get(remotePeerId);
+          if (
+            event.track.kind === 'audio' &&
+            (event.transceiver === voiceTransceiver || event.transceiver.mid === voiceMids.current.get(remotePeerId))
+          ) {
             attachVoice(remotePeerId, event.track);
             return;
           }
@@ -426,10 +448,11 @@ export function useLinkcast() {
         const voiceMid = (payload as RTCSessionDescriptionInit & { voiceMid?: string }).voiceMid;
         if (typeof voiceMid === 'string') voiceMids.current.set(signal.senderId, voiceMid);
         await connection.setRemoteDescription(payload as RTCSessionDescriptionInit);
-        const voiceTransceiver = connection.getTransceivers().find(t => t.mid === voiceMid);
+        const voiceTransceiver = findVoiceTransceiver(connection, voiceMid);
         if (voiceTransceiver) {
           voiceTransceiver.direction = 'sendrecv';
           voiceTransceivers.current.set(signal.senderId, voiceTransceiver);
+          if (voiceTransceiver.mid) voiceMids.current.set(signal.senderId, voiceTransceiver.mid);
           await voiceTransceiver.sender.replaceTrack(voiceTrack.current);
         }
         await flushCandidates(signal.senderId, connection);
@@ -456,6 +479,10 @@ export function useLinkcast() {
         if (generation !== loopGenerationRef.current) return;
         await connection.setRemoteDescription(payload as RTCSessionDescriptionInit);
         await flushCandidates(signal.senderId, connection);
+        const voiceTransceiver = voiceTransceivers.current.get(signal.senderId);
+        if (voiceTransceiver) {
+          await voiceTransceiver.sender.replaceTrack(voiceTrack.current);
+        }
         // Reapply once encodings have been negotiated; some browsers reject pre-offer parameters.
         for (const sender of connection.getSenders()) {
           if (sender.track?.kind !== 'video') continue;
