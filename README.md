@@ -10,20 +10,28 @@
 ## 주요 기능
 
 - 1080p 60fps 캡처보드 입력
+- 대역폭 부족 시 프레임레이트를 먼저 조절하는 해상도 유지 우선 전송
 - 송출 화면 미리보기와 실제 해상도·프레임 표시
 - 링크 기반 방 생성 및 참가
 - 최대 5명까지 시청
 - 데스크톱·모바일 반응형 화면
+- 클릭·터치 자취 공유 및 별도 전체화면 메뉴
 
 ## 연결 구조
 
 영상과 오디오는 서버를 거치지 않고 WebRTC P2P로 직접 전달됩니다.
-서버는 방 정보와 WebRTC 연결 협상 정보만 잠시 저장합니다.
+방마다 Cloudflare Durable Object가 WebSocket 연결과 참가 인원을 관리합니다.
+연결 신호는 즉시 전달하며, 정기 HTTP 조회와 시그널용 D1 읽기·쓰기는 사용하지 않습니다.
 
 ```text
 송출자 ───── WebRTC P2P ───── 참가자
-   └── 방 생성·연결 협상 정보 ── D1
+   └── WebSocket 연결 신호 ── Durable Object
 ```
+
+WebSocket Hibernation과 30초 자동 ping/pong을 사용합니다. 끊어진 연결은 종료 이벤트로 정리하며,
+이벤트가 오지 않는 단절은 2분 간격 검사로 회수합니다. 새 입장 시에도 만료 연결을 확인합니다.
+송출자 소켓 재연결에는 2분의 유예 시간을 둡니다. 절전·모바일 백그라운드에서는 재연결이 필요할 수 있습니다.
+실제 1080p 유지 여부는 캡처보드 입력, 송출자의 업로드·인코딩 성능, 수신자의 회선에 따라 달라집니다.
 
 ## 실행
 
@@ -42,5 +50,19 @@ npm run build
 
 - Next.js 호환 Vinext
 - WebRTC
-- Cloudflare D1
-- Drizzle ORM
+- Cloudflare Workers + SQLite 기반 Durable Objects (WebSocket Hibernation)
+
+## 배포 및 검증
+
+`npm run build` 후 `npx wrangler deploy --config dist/server/wrangler.json`으로 배포합니다.
+최초 배포 시 `v1-rooms` 마이그레이션이 Durable Object를 생성합니다.
+기존 D1 데이터와 바인딩은 보존하지만 새 연결 흐름에서는 사용하지 않습니다.
+업데이트 후 송출자·수신자 모두 새로고침하고 새 방을 만들어야 합니다.
+
+로컬 연결 검증:
+
+```bash
+npx wrangler dev --config dist/server/wrangler.json --port 8799 --local
+# 다른 터미널에서
+node scripts/test-signaling.mjs
+```

@@ -1,6 +1,7 @@
 'use client';
 
 import { useCallback, useEffect, useRef, useState } from 'react';
+import { SignalingSocket } from './signaling-socket';
 
 type Role = 'host' | 'viewer';
 export type LaserPoint = { x: number; y: number };
@@ -36,35 +37,24 @@ const rtcConfiguration: RTCConfiguration = {
 const SIGNALING_RETRY_ERROR = '연결 서버에 닿지 못했어요. 다시 연결하고 있습니다.';
 const VIDEO_MAX_BITRATE = 12_000_000;
 const MAX_VIEWERS = 5;
-const SIGNAL_POLL_INTERVAL_MS = 3_000;
-const HEARTBEAT_INTERVAL_MS = 10_000;
 
 function randomId() {
   return crypto.randomUUID().replaceAll('-', '');
 }
 
-async function api<T>(path: string, init?: RequestInit): Promise<T> {
-  const headers = new Headers(init?.headers);
-  headers.set('content-type', 'application/json');
-  const response = await fetch(path, {
-    ...init,
-    headers,
-  });
-  const body = (await response.json()) as T & { error?: string };
-  if (!response.ok) {
-    const error = new Error(body.error || 'request_failed');
-    error.name = body.error || 'request_failed';
-    throw error;
-  }
-  return body;
-}
 
 export function useLinkcast() {
+  const transportRef = useRef<SignalingSocket | null>(null);
   const [status, setStatus] = useState<ConnectionStatus>('idle');
   const [roomId, setRoomId] = useState('');
   const [viewerCount, setViewerCount] = useState(0);
   const [remoteStream, setRemoteStream] = useState<MediaStream | null>(null);
   const [error, setError] = useState('');
+  const api = useCallback(<T,>(path: string, init?: RequestInit) => {
+    const transport = transportRef.current ??= new SignalingSocket();
+    transport.onStatus = connected => setError(current => connected ? (current === SIGNALING_RETRY_ERROR ? '' : current) : SIGNALING_RETRY_ERROR);
+    return transport.request<T>(path, init);
+  }, []);
   const [laserStroke, setLaserStroke] = useState<LaserStroke | null>(null);
   const laserChannels = useRef(new Map<string, RTCDataChannel>());
   const sendLaserStroke = useCallback((points: LaserPoint[]) => {
@@ -84,10 +74,6 @@ export function useLinkcast() {
   const hostIdRef = useRef('');
   const localStreamRef = useRef<MediaStream | null>(null);
   const lastSignalIdRef = useRef(0);
-  const pollingRef = useRef<number | null>(null);
-  const heartbeatRef = useRef<number | null>(null);
-  const pollingFailuresRef = useRef(0);
-  const pollingInFlightRef = useRef(false);
   const loopGenerationRef = useRef(0);
   const peerConnectionsRef = useRef(new Map<string, RTCPeerConnection>());
   const candidateQueuesRef = useRef(new Map<string, RTCIceCandidateInit[]>());
@@ -114,7 +100,7 @@ export function useLinkcast() {
         }),
       });
     },
-    [],
+    [api],
   );
 
   const flushCandidates = useCallback(async (peerId: string, connection: RTCPeerConnection) => {
@@ -198,7 +184,7 @@ export function useLinkcast() {
           });
       }, delay);
     },
-    [closePeer],
+    [api, closePeer],
   );
 
   const createPeerConnection = useCallback(
@@ -288,12 +274,12 @@ export function useLinkcast() {
 
       if (roleRef.current === 'host') {
         for (const track of localStreamRef.current?.getTracks() || []) {
-          if (track.kind === 'video') track.contentHint = 'motion';
+          if (track.kind === 'video') track.contentHint = 'detail';
           const sender = connection.addTrack(track, localStreamRef.current!);
           if (track.kind === 'video') {
             const parameters = sender.getParameters();
             parameters.encodings = parameters.encodings.length ? parameters.encodings : [{}];
-            parameters.degradationPreference = 'balanced';
+            parameters.degradationPreference = 'maintain-resolution';
             parameters.encodings[0].maxBitrate = VIDEO_MAX_BITRATE;
             parameters.encodings[0].maxFramerate = 60;
             parameters.encodings[0].scaleResolutionDownBy = 1;
@@ -402,6 +388,16 @@ export function useLinkcast() {
         if (generation !== loopGenerationRef.current) return;
         await connection.setRemoteDescription(payload as RTCSessionDescriptionInit);
         await flushCandidates(signal.senderId, connection);
+        // Reapply once encodings have been negotiated; some browsers reject pre-offer parameters.
+        for (const sender of connection.getSenders()) {
+          if (sender.track?.kind !== 'video') continue;
+          const parameters = sender.getParameters();
+          if (!parameters.encodings.length) continue;
+          parameters.degradationPreference = 'maintain-resolution';
+          parameters.encodings[0].maxBitrate = VIDEO_MAX_BITRATE;
+          parameters.encodings[0].maxFramerate = 60;
+          await sender.setParameters(parameters).catch(() => undefined);
+        }
       } else if (signal.kind === 'candidate') {
         const candidate = payload as RTCIceCandidateInit;
         if (connection.remoteDescription) await connection.addIceCandidate(candidate).catch(() => undefined);
@@ -415,88 +411,25 @@ export function useLinkcast() {
     [closePeer, createPeerConnection, flushCandidates, sendSignal],
   );
 
-  const refreshLease = useCallback(async () => {
-    const roomId = roomIdRef.current;
-    const peerId = peerIdRef.current;
-    const role = roleRef.current;
-    if (!roomId || !peerId || !role) return;
-
-    try {
-      const result = await api<{ active: boolean }>('/api/rooms', {
-        method: 'PATCH',
-        body: JSON.stringify({ roomId, peerId }),
-      });
-      if (
-        result.active ||
-        roomIdRef.current !== roomId ||
-        peerIdRef.current !== peerId ||
-        roleRef.current !== role
-      ) return;
-
-      await api('/api/rooms', {
-        method: 'POST',
-        body: JSON.stringify({ roomId, peerId, role }),
-      });
-    } catch {
-      // 다음 heartbeat에서 다시 시도합니다.
-    }
-  }, []);
+  const refreshLease = useCallback(async () => { transportRef.current?.resume(); }, []);
 
   const stopLoops = useCallback(() => {
     loopGenerationRef.current += 1;
-    if (pollingRef.current) window.clearInterval(pollingRef.current);
-    if (heartbeatRef.current) window.clearInterval(heartbeatRef.current);
     if (viewerRecoveryTimerRef.current) window.clearTimeout(viewerRecoveryTimerRef.current);
-    pollingRef.current = null;
-    heartbeatRef.current = null;
     viewerRecoveryTimerRef.current = null;
     viewerRecoveryRef.current = false;
-    pollingInFlightRef.current = false;
   }, []);
 
   const startLoops = useCallback(() => {
     stopLoops();
-    pollingFailuresRef.current = 0;
     const generation = loopGenerationRef.current;
-    const poll = async () => {
-      if (
-        generation !== loopGenerationRef.current ||
-        pollingInFlightRef.current ||
-        !roomIdRef.current ||
-        !peerIdRef.current
-      ) return;
-      pollingInFlightRef.current = true;
-      try {
-        const query = new URLSearchParams({
-          roomId: roomIdRef.current,
-          peerId: peerIdRef.current,
-          after: String(lastSignalIdRef.current),
-        });
-        const result = await api<{ signals: Signal[] }>(`/api/signals?${query}`);
-        for (const signal of result.signals) {
-          if (generation !== loopGenerationRef.current) break;
-          await handleSignal(signal, generation);
-          if (generation === loopGenerationRef.current) {
-            lastSignalIdRef.current = Math.max(lastSignalIdRef.current, signal.id);
-          }
-        }
-        if (generation === loopGenerationRef.current) {
-          pollingFailuresRef.current = 0;
-          setError((current) => (current === SIGNALING_RETRY_ERROR ? '' : current));
-        }
-      } catch {
-        if (generation === loopGenerationRef.current) {
-          pollingFailuresRef.current += 1;
-          if (pollingFailuresRef.current >= 8) setError(SIGNALING_RETRY_ERROR);
-        }
-      } finally {
-        if (generation === loopGenerationRef.current) pollingInFlightRef.current = false;
-      }
-    };
-    void poll();
-    pollingRef.current = window.setInterval(() => void poll(), SIGNAL_POLL_INTERVAL_MS);
-    heartbeatRef.current = window.setInterval(() => void refreshLease(), HEARTBEAT_INTERVAL_MS);
-  }, [handleSignal, refreshLease, stopLoops]);
+    let queue = Promise.resolve();
+    transportRef.current?.subscribe(signal => {
+      queue = queue.then(async () => {
+        if (generation === loopGenerationRef.current) await handleSignal(signal, generation);
+      }).catch(() => setError(SIGNALING_RETRY_ERROR));
+    });
+  }, [handleSignal, stopLoops]);
 
   const leave = useCallback(async () => {
     setLaserStroke(null);
@@ -537,7 +470,7 @@ export function useLinkcast() {
         keepalive: true,
       }).catch(() => undefined);
     }
-  }, [stopLoops]);
+  }, [api, stopLoops]);
 
   const createRoom = useCallback(
     async (stream: MediaStream) => {
@@ -566,7 +499,7 @@ export function useLinkcast() {
         return null;
       }
     },
-    [leave, startLoops],
+    [api, leave, startLoops],
   );
 
   const joinRoom = useCallback(
@@ -603,28 +536,13 @@ export function useLinkcast() {
         return false;
       }
     },
-    [leave, startLoops],
+    [api, leave, startLoops],
   );
 
   useEffect(() => {
     const connections = peerConnectionsRef.current;
-    const handlePageHide = () => {
-      const currentRoom = roomIdRef.current;
-      const currentPeer = peerIdRef.current;
-      if (currentRoom && currentPeer) {
-        const body = JSON.stringify({ roomId: currentRoom, peerId: currentPeer, role: 'leave' });
-        const beaconSent =
-          typeof navigator.sendBeacon === 'function' &&
-          navigator.sendBeacon('/api/rooms', new Blob([body], { type: 'application/json' }));
-        if (!beaconSent) {
-          void fetch('/api/rooms', {
-            method: 'DELETE',
-            headers: { 'content-type': 'application/json' },
-            body: JSON.stringify({ roomId: currentRoom, peerId: currentPeer }),
-            keepalive: true,
-          });
-        }
-      }
+    const handlePageHide = (event: PageTransitionEvent) => {
+      if (!event.persisted) transportRef.current?.close();
     };
     const handleVisibilityChange = () => {
       if (document.visibilityState === 'visible') void refreshLease();
@@ -635,6 +553,7 @@ export function useLinkcast() {
       window.removeEventListener('pagehide', handlePageHide);
       document.removeEventListener('visibilitychange', handleVisibilityChange);
       stopLoops();
+      transportRef.current?.close();
       connections.forEach((connection) => connection.close());
     };
   }, [refreshLease, stopLoops]);
