@@ -44,6 +44,14 @@ export function LaserOverlay({ ratio, stroke, onSend }: { ratio: number; stroke:
     }
     setDraft([...current.points]);
   };
+  const finish = (pointerId: number) => {
+    const current = active.current;
+    if (!current || current.pointerId !== pointerId) return;
+    // Capture loss often follows pointerup. Clear first so a stroke is sent only once.
+    active.current = null;
+    onSend(current.points.slice());
+    setDraft([]);
+  };
   const draw = (points: LaserPoint[]) => {
     if (!points.length) return null;
     const coordinates = points.map(p => `${p.x * size.width},${p.y * size.height}`);
@@ -68,12 +76,10 @@ export function LaserOverlay({ ratio, stroke, onSend }: { ratio: number; stroke:
       onPointerUp={event => {
         if (active.current?.pointerId !== event.pointerId) return;
         append(event);
-        onSend(active.current.points.slice());
-        active.current = null;
-        setDraft([]);
+        finish(event.pointerId);
       }}
-      onPointerCancel={() => { active.current = null; setDraft([]); }}
-      onLostPointerCapture={() => { active.current = null; setDraft([]); }}>
+      onPointerCancel={event => finish(event.pointerId)}
+      onLostPointerCapture={event => finish(event.pointerId)}>
       <rect width="100%" height="100%" fill="transparent" />
       <g key={stroke?.id} ref={fading}>{visible && draw(visible.points)}</g>
       {draw(draft)}

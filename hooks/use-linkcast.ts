@@ -61,7 +61,7 @@ export function useLinkcast() {
     const message = JSON.stringify(stroke);
     laserChannels.current.forEach((channel, peerId) => {
       if (peerId === excludedPeerId) return;
-      if (channel.readyState === 'open' && channel.bufferedAmount < 16384) {
+      if (channel.readyState === 'open' && channel.bufferedAmount < 65536) {
         try { channel.send(message); } catch { /* Connection may close during release. */ }
       }
     });
@@ -198,7 +198,8 @@ export function useLinkcast() {
 
       const connection = new RTCPeerConnection(rtcConfiguration);
       peerConnectionsRef.current.set(remotePeerId, connection);
-      const channel = connection.createDataChannel('laser', { negotiated: true, id: 0, ordered: false, maxRetransmits: 0 });
+      // Completed strokes need brief loss recovery; this is a retry deadline, not a send delay.
+      const channel = connection.createDataChannel('laser', { negotiated: true, id: 0, ordered: false, maxPacketLifeTime: 500 });
       laserChannels.current.set(remotePeerId, channel);
       channel.onclose = () => {
         if (laserChannels.current.get(remotePeerId) === channel) laserChannels.current.delete(remotePeerId);
