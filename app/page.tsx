@@ -176,6 +176,8 @@ export default function Home() {
   const viewerStageRef = useRef<HTMLElement>(null);
   const nativeHostFullscreenRef = useRef(false);
   const nativeViewerFullscreenRef = useRef(false);
+  const viewportHostFullscreenRef = useRef(false);
+  const viewportViewerFullscreenRef = useRef(false);
   const viewerAutoPipAttemptRef = useRef(false);
   const hostControlsTimerRef = useRef<number | null>(null);
   const viewerControlsTimerRef = useRef<number | null>(null);
@@ -526,8 +528,11 @@ export default function Home() {
         (document.visibilityState !== 'hidden' && event?.type !== 'pagehide') ||
         !remoteStream ||
         !viewerVideoReady ||
-        isViewerFullscreen ||
-        nativeViewerFullscreenRef.current ||
+        // Keep the Safari native-video fullscreen path eligible for automatic
+        // PiP. Only the in-page viewport fallback and standard element
+        // fullscreen should block this background transition.
+        viewportViewerFullscreenRef.current ||
+        Boolean(document.fullscreenElement) ||
         viewerAutoPipAttemptRef.current
       ) {
         return;
@@ -551,7 +556,7 @@ export default function Home() {
       window.removeEventListener('pagehide', requestAutomaticPictureInPicture);
       if ('autoPictureInPicture' in video) video.autoPictureInPicture = false;
     };
-  }, [enterViewerPictureInPicture, isViewerFullscreen, remoteStream, viewerVideoReady]);
+  }, [enterViewerPictureInPicture, remoteStream, viewerVideoReady]);
 
   useEffect(() => {
     const video = viewerVideoRef.current as PictureInPictureVideo | null;
@@ -665,6 +670,8 @@ export default function Home() {
     }
     nativeHostFullscreenRef.current = false;
     nativeViewerFullscreenRef.current = false;
+    viewportHostFullscreenRef.current = false;
+    viewportViewerFullscreenRef.current = false;
     void leave();
     setMode(nextMode);
     setJoinValue('');
@@ -698,6 +705,13 @@ export default function Home() {
     if (!stage) return;
     try {
       const nativeVideo = video as WebkitFullscreenVideo | null;
+      if (viewportHostFullscreenRef.current) {
+        viewportHostFullscreenRef.current = false;
+        nativeHostFullscreenRef.current = false;
+        setIsHostFullscreen(false);
+        setShowHostControls(true);
+        return;
+      }
       if (nativeHostFullscreenRef.current) {
         nativeVideo?.webkitExitFullscreen?.();
         nativeHostFullscreenRef.current = false;
@@ -707,18 +721,28 @@ export default function Home() {
       }
       if (document.fullscreenElement) {
         await document.exitFullscreen();
+        viewportHostFullscreenRef.current = false;
+        nativeHostFullscreenRef.current = false;
+        setIsHostFullscreen(false);
+        setShowHostControls(true);
         return;
       }
       setShowHostControls(false);
       const fullscreenMode = await requestFullscreenWithFallback(stage, video);
-      if (fullscreenMode === 'native-video' || fullscreenMode === 'viewport') {
+      if (fullscreenMode === 'native-video') {
         nativeHostFullscreenRef.current = true;
+        viewportHostFullscreenRef.current = false;
+        setIsHostFullscreen(true);
+      } else if (fullscreenMode === 'viewport') {
+        nativeHostFullscreenRef.current = false;
+        viewportHostFullscreenRef.current = true;
         setIsHostFullscreen(true);
       } else if (!fullscreenMode) {
         throw new Error('fullscreen_unsupported');
       }
     } catch {
       nativeHostFullscreenRef.current = false;
+      viewportHostFullscreenRef.current = false;
       setIsHostFullscreen(false);
       setShowHostControls(true);
     }
@@ -738,6 +762,13 @@ export default function Home() {
     if (!stage) return;
     try {
       const nativeVideo = video as WebkitFullscreenVideo | null;
+      if (viewportViewerFullscreenRef.current) {
+        viewportViewerFullscreenRef.current = false;
+        nativeViewerFullscreenRef.current = false;
+        setIsViewerFullscreen(false);
+        setShowViewerControls(true);
+        return;
+      }
       if (nativeViewerFullscreenRef.current) {
         nativeVideo?.webkitExitFullscreen?.();
         nativeViewerFullscreenRef.current = false;
@@ -747,18 +778,28 @@ export default function Home() {
       }
       if (document.fullscreenElement) {
         await document.exitFullscreen();
+        viewportViewerFullscreenRef.current = false;
+        nativeViewerFullscreenRef.current = false;
+        setIsViewerFullscreen(false);
+        setShowViewerControls(true);
         return;
       }
       setShowViewerControls(false);
       const fullscreenMode = await requestFullscreenWithFallback(stage, video);
-      if (fullscreenMode === 'native-video' || fullscreenMode === 'viewport') {
+      if (fullscreenMode === 'native-video') {
         nativeViewerFullscreenRef.current = true;
+        viewportViewerFullscreenRef.current = false;
+        setIsViewerFullscreen(true);
+      } else if (fullscreenMode === 'viewport') {
+        nativeViewerFullscreenRef.current = false;
+        viewportViewerFullscreenRef.current = true;
         setIsViewerFullscreen(true);
       } else if (!fullscreenMode) {
         throw new Error('fullscreen_unsupported');
       }
     } catch {
       nativeViewerFullscreenRef.current = false;
+      viewportViewerFullscreenRef.current = false;
       setIsViewerFullscreen(false);
       setShowViewerControls(true);
     }
@@ -777,32 +818,54 @@ export default function Home() {
     const viewerVideo = viewerVideoRef.current;
     const handleNativeHostBegin = () => {
       nativeHostFullscreenRef.current = true;
+      viewportHostFullscreenRef.current = false;
       setIsHostFullscreen(true);
       setShowHostControls(false);
     };
     const handleNativeHostEnd = () => {
       nativeHostFullscreenRef.current = false;
+      viewportHostFullscreenRef.current = false;
       setIsHostFullscreen(false);
       setShowHostControls(true);
     };
     const handleNativeViewerBegin = () => {
       nativeViewerFullscreenRef.current = true;
+      viewportViewerFullscreenRef.current = false;
       setIsViewerFullscreen(true);
       setShowViewerControls(false);
     };
     const handleNativeViewerEnd = () => {
       nativeViewerFullscreenRef.current = false;
+      viewportViewerFullscreenRef.current = false;
       setIsViewerFullscreen(false);
       setShowViewerControls(true);
+    };
+    const handleEscapeForViewportFullscreen = (event: KeyboardEvent) => {
+      if (event.key !== 'Escape') return;
+
+      if (viewportHostFullscreenRef.current) {
+        viewportHostFullscreenRef.current = false;
+        nativeHostFullscreenRef.current = false;
+        setIsHostFullscreen(false);
+        setShowHostControls(true);
+      }
+      if (viewportViewerFullscreenRef.current) {
+        viewportViewerFullscreenRef.current = false;
+        nativeViewerFullscreenRef.current = false;
+        setIsViewerFullscreen(false);
+        setShowViewerControls(true);
+      }
     };
     const handleFullscreenChange = () => {
       const hostFullscreen =
         nativeHostFullscreenRef.current ||
+        viewportHostFullscreenRef.current ||
         document.fullscreenElement === hostStageRef.current ||
         document.fullscreenElement === hostVideo ||
         (mode === 'host' && document.fullscreenElement === document.documentElement);
       const viewerFullscreen =
         nativeViewerFullscreenRef.current ||
+        viewportViewerFullscreenRef.current ||
         document.fullscreenElement === viewerStageRef.current ||
         document.fullscreenElement === viewerVideo ||
         (mode === 'viewer' && document.fullscreenElement === document.documentElement);
@@ -817,12 +880,14 @@ export default function Home() {
     hostVideo?.addEventListener('webkitendfullscreen', handleNativeHostEnd);
     viewerVideo?.addEventListener('webkitbeginfullscreen', handleNativeViewerBegin);
     viewerVideo?.addEventListener('webkitendfullscreen', handleNativeViewerEnd);
+    window.addEventListener('keydown', handleEscapeForViewportFullscreen);
     document.addEventListener('fullscreenchange', handleFullscreenChange);
     return () => {
       hostVideo?.removeEventListener('webkitbeginfullscreen', handleNativeHostBegin);
       hostVideo?.removeEventListener('webkitendfullscreen', handleNativeHostEnd);
       viewerVideo?.removeEventListener('webkitbeginfullscreen', handleNativeViewerBegin);
       viewerVideo?.removeEventListener('webkitendfullscreen', handleNativeViewerEnd);
+      window.removeEventListener('keydown', handleEscapeForViewportFullscreen);
       document.removeEventListener('fullscreenchange', handleFullscreenChange);
       if (hostControlsTimerRef.current) window.clearTimeout(hostControlsTimerRef.current);
       if (viewerControlsTimerRef.current) window.clearTimeout(viewerControlsTimerRef.current);
