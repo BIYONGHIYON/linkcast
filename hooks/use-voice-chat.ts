@@ -35,7 +35,7 @@ export function useVoiceChat() {
   const analysisTimer = useRef<number | null>(null);
   const output = useRef<GainNode | null>(null);
   const receivers = useRef(new Map<string, MediaStreamTrack>());
-  const sources = useRef(new Map<string, MediaStreamAudioSourceNode>());
+  const sources = useRef(new Map<string, MediaElementAudioSourceNode>());
   const players = useRef(new Map<string, HTMLAudioElement>());
   const generation = useRef(0);
   const volumeRef = useRef(volume);
@@ -102,22 +102,23 @@ export function useVoiceChat() {
     }
     incoming.enabled = true;
 
-    // Render the original remote stream, not a re-synthesized destination
-    // stream. Native media playback is the primary path; Web Audio only
-    // supplies gain above 100%, so normal playback does not depend on it.
+    // Route media playback into Web Audio, replacing its direct speaker
+    // output. There is exactly one audible path at every volume:
+    // remote stream -> media element -> gain -> destination.
     const stream = new MediaStream([incoming]);
     const player = new Audio();
     player.autoplay = true;
     player.setAttribute('playsinline', '');
     player.hidden = true;
-    player.volume = Math.min(1, volumeRef.current / 100);
-    player.muted = volumeRef.current === 0;
+    player.volume = 1;
+    player.muted = false;
+    // Connect before assigning srcObject/autoplay can start direct playback.
+    const source = context.current.createMediaElementSource(player);
+    source.connect(output.current);
+    sources.current.set(id, source);
     player.srcObject = stream;
     document.body.appendChild(player);
     players.current.set(id, player);
-    const source = context.current.createMediaStreamSource(stream);
-    source.connect(output.current);
-    sources.current.set(id, source);
     void resumePlayback();
   }, [resumePlayback]);
 
@@ -169,7 +170,7 @@ export function useVoiceChat() {
       const audio = new AudioContext({ latencyHint: 'interactive' });
       context.current = audio;
       output.current = audio.createGain();
-      output.current.gain.value = Math.max(0, volumeRef.current / 100 - 1);
+      output.current.gain.value = volumeRef.current / 100;
       output.current.connect(audio.destination);
       inputGraph.current = [output.current];
 
@@ -278,11 +279,7 @@ export function useVoiceChat() {
 
   useEffect(() => {
     volumeRef.current = volume;
-    if (output.current) output.current.gain.value = Math.max(0, volume / 100 - 1);
-    players.current.forEach(player => {
-      player.volume = Math.min(1, volume / 100);
-      player.muted = volume === 0;
-    });
+    if (output.current) output.current.gain.value = volume / 100;
   }, [volume]);
 
   useEffect(() => {

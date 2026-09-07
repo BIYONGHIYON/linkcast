@@ -18,6 +18,14 @@ function setup() {
     resume() { return Promise.resolve(); }
     close() { return Promise.resolve(); }
     createMediaStreamSource() { return node(); }
+    createMediaElementSource(player) {
+      assert.equal(player.srcObject, undefined, 'reroute before remote playback starts');
+      player.routedThroughWebAudio = true;
+      return { ...node(), connect(gain) {
+        assert.equal(gain.gain.value, 1.5, 'single path applies full 150 percent gain');
+        return gain;
+      } };
+    }
     createAnalyser() { return { ...node(), fftSize: 1024, getFloatTimeDomainData(buffer) { buffer.fill(0.1); } }; }
     createGain() { return { ...node(), gain: { value: 1 } }; }
     createMediaStreamDestination() {
@@ -69,6 +77,8 @@ function setup() {
   assert.equal(playback[0].srcObject.tracks[0], incoming, 'native player receives original remote track');
   assert.equal(playback[0].connected, true);
   assert.equal(playback[0].played, true);
+  assert.equal(playback[0].routedThroughWebAudio, true, 'native output is rerouted, not mixed with a second stream source');
+  assert.equal(playback[0].volume, 1);
   assert.equal(playback[0].sinkId, 'same-as-video-output');
   voice.attach('peer', incoming);
   assert.equal(playback.length, 1, 'duplicate ontrack does not interrupt playback');
