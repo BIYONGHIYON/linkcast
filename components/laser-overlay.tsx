@@ -8,6 +8,7 @@ export function LaserOverlay({ ratio, stroke, onSend }: { ratio: number; stroke:
   const active = useRef<{ pointerId: number; points: LaserPoint[] } | null>(null);
   const [draft, setDraft] = useState<LaserPoint[]>([]);
   const [expiredId, setExpiredId] = useState<string | null>(null);
+  const fading = useRef<SVGGElement>(null);
   const visible = stroke?.id !== expiredId ? stroke : null;
   const [size, setSize] = useState({ width: 0, height: 0 });
   useEffect(() => {
@@ -21,8 +22,9 @@ export function LaserOverlay({ ratio, stroke, onSend }: { ratio: number; stroke:
     return () => observer.disconnect();
   }, [ratio]);
   useEffect(() => {
+    const animation = fading.current?.animate([{ opacity: 1 }, { opacity: 1, offset: 0.6 }, { opacity: 0 }], { duration: 2500, fill: 'forwards' });
     const timer = window.setTimeout(() => setExpiredId(stroke?.id || null), 2500);
-    return () => window.clearTimeout(timer);
+    return () => { window.clearTimeout(timer); animation?.cancel(); };
   }, [stroke]);
   const point = (event: { clientX: number; clientY: number }, element: SVGSVGElement): LaserPoint => {
     const rect = element.getBoundingClientRect();
@@ -36,14 +38,22 @@ export function LaserOverlay({ ratio, stroke, onSend }: { ratio: number; stroke:
     const samples = [...coalesced, event];
     for (const sample of samples) {
       if (current.points.length >= 512) current.points = current.points.filter((_, i) => i % 2 === 0);
-      current.points.push(point(sample, event.currentTarget));
+      const next = point(sample, event.currentTarget);
+      const last = current.points.at(-1)!;
+      if (Math.hypot((next.x - last.x) * size.width, (next.y - last.y) * size.height) >= 1) current.points.push(next);
     }
     setDraft([...current.points]);
   };
-  const draw = (points: LaserPoint[]) => points.length > 0 && <g fill="none" strokeLinecap="round" strokeLinejoin="round">
-    <polyline points={points.map(p => `${p.x * size.width},${p.y * size.height}`).join(' ')} stroke="#ed1c2e" strokeWidth="8" />
-    <polyline points={points.map(p => `${p.x * size.width},${p.y * size.height}`).join(' ')} stroke="#ffffff" strokeWidth="3.5" />
-  </g>;
+  const draw = (points: LaserPoint[]) => {
+    if (!points.length) return null;
+    const coordinates = points.map(p => `${p.x * size.width},${p.y * size.height}`);
+    // A tiny segment renders a tap with the same cap as a line, without a separate head.
+    if (points.length === 1) coordinates.push(`${points[0].x * size.width + 0.01},${points[0].y * size.height}`);
+    return <g fill="none" strokeLinecap="round" strokeLinejoin="round" pointerEvents="none">
+      <polyline points={coordinates.join(' ')} stroke="#ed1c2e" strokeWidth="8" />
+      <polyline points={coordinates.join(' ')} stroke="#ffffff" strokeWidth="3.5" />
+    </g>;
+  };
   return <div ref={root} className="pointer-events-none absolute inset-0 flex items-center justify-center">
     <svg aria-label="누른 채 그린 후 손을 떼면 포인터 공유" className="pointer-events-auto touch-none select-none" style={{ width: size.width, height: size.height, touchAction: 'none', userSelect: 'none' }} viewBox={`0 0 ${size.width} ${size.height}`} 
       onContextMenu={event => event.preventDefault()}
@@ -64,7 +74,8 @@ export function LaserOverlay({ ratio, stroke, onSend }: { ratio: number; stroke:
       }}
       onPointerCancel={() => { active.current = null; setDraft([]); }}
       onLostPointerCapture={() => { active.current = null; setDraft([]); }}>
-      {visible && draw(visible.points)}
+      <rect width="100%" height="100%" fill="transparent" />
+      <g key={stroke?.id} ref={fading}>{visible && draw(visible.points)}</g>
       {draw(draft)}
     </svg>
   </div>;

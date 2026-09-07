@@ -57,19 +57,17 @@ export function useLinkcast() {
   }, []);
   const [laserStroke, setLaserStroke] = useState<LaserStroke | null>(null);
   const laserChannels = useRef(new Map<string, RTCDataChannel>());
-  const pendingLaserStrokeRef = useRef<{ stroke: LaserStroke; expiresAt: number } | null>(null);
   const broadcastLaserStroke = useCallback((stroke: LaserStroke, excludedPeerId?: string) => {
-    pendingLaserStrokeRef.current = { stroke, expiresAt: Date.now() + 2000 };
     const message = JSON.stringify(stroke);
     laserChannels.current.forEach((channel, peerId) => {
       if (peerId === excludedPeerId) return;
-      if (channel.readyState === 'open' && channel.bufferedAmount < 65536) {
+      if (channel.readyState === 'open' && channel.bufferedAmount < 16384) {
         try { channel.send(message); } catch { /* Connection may close during release. */ }
       }
     });
   }, []);
   const sendLaserStroke = useCallback((points: LaserPoint[]) => {
-    const stroke = { id: crypto.randomUUID(), points: points.slice(0, 512) };
+    const stroke = { id: crypto.randomUUID(), points: points.slice(0, 512).map(p => ({ x: Math.round(p.x * 10000) / 10000, y: Math.round(p.y * 10000) / 10000 })) };
     setLaserStroke(stroke);
     broadcastLaserStroke(stroke);
   }, [broadcastLaserStroke]);
@@ -202,11 +200,6 @@ export function useLinkcast() {
       peerConnectionsRef.current.set(remotePeerId, connection);
       const channel = connection.createDataChannel('laser', { negotiated: true, id: 0, ordered: false, maxRetransmits: 0 });
       laserChannels.current.set(remotePeerId, channel);
-      channel.onopen = () => {
-        const pending = pendingLaserStrokeRef.current;
-        if (!pending || pending.expiresAt < Date.now() || channel.readyState !== 'open') return;
-        try { channel.send(JSON.stringify(pending.stroke)); } catch { /* Connection may close during release. */ }
-      };
       channel.onclose = () => {
         if (laserChannels.current.get(remotePeerId) === channel) laserChannels.current.delete(remotePeerId);
       };
@@ -234,6 +227,7 @@ export function useLinkcast() {
           viewerReconnectAttemptsRef.current = 0;
           viewerRecoveryRef.current = false;
           setStatus('connected');
+          setError('');
         } else if (connection.iceConnectionState === 'checking') {
           setStatus('connecting');
         } else if (connection.iceConnectionState === 'disconnected') {
@@ -332,7 +326,7 @@ export function useLinkcast() {
       if (signal.kind === 'leave') {
         closePeer(signal.senderId);
         if (roleRef.current === 'host') {
-          setStatus('waiting');
+          setStatus(peerConnectionsRef.current.size ? 'connected' : 'waiting');
         } else if (roleRef.current === 'viewer') {
           setStatus('not-found');
           setError('송출자가 연결을 종료했어요.');
@@ -341,17 +335,23 @@ export function useLinkcast() {
       }
 
       if (signal.kind === 'host_lost' && roleRef.current === 'viewer') {
-        closePeer(signal.senderId);
+        const connection = peerConnectionsRef.current.get(signal.senderId);
+        if (connection && ['connected', 'completed'].includes(connection.iceConnectionState)) return;
         setStatus('connecting');
         setError('송출자 연결을 확인하고 있어요.');
         return;
       }
 
       if (signal.kind === 'host_restart' && roleRef.current === 'viewer') {
+        const connection = peerConnectionsRef.current.get(signal.senderId);
+        if (connection && ['connected', 'completed'].includes(connection.iceConnectionState)) {
+          setError('');
+          return;
+        }
         closePeer(signal.senderId);
         setStatus('connecting');
         setError('');
-        await sendSignal(signal.senderId, 'join', {});
+        await sendSignal(signal.senderId, 'join', { reset: true });
         return;
       }
 
@@ -366,6 +366,10 @@ export function useLinkcast() {
       if (signal.kind === 'join' && roleRef.current === 'host') {
         if (peerConnectionsRef.current.size >= MAX_VIEWERS && !peerConnectionsRef.current.has(signal.senderId)) return;
         let connection = peerConnectionsRef.current.get(signal.senderId);
+        if (connection && ((payload as { reset?: boolean }).reset || connection.signalingState !== 'stable')) {
+          closePeer(signal.senderId);
+          connection = undefined;
+        }
         if (connection?.signalingState === 'closed' || connection?.iceConnectionState === 'failed') {
           closePeer(signal.senderId);
           connection = undefined;
@@ -426,6 +430,7 @@ export function useLinkcast() {
           parameters.degradationPreference = 'maintain-resolution';
           parameters.encodings[0].maxBitrate = VIDEO_MAX_BITRATE;
           parameters.encodings[0].maxFramerate = 60;
+          parameters.encodings[0].scaleResolutionDownBy = 1;
           await sender.setParameters(parameters).catch(() => undefined);
         }
       } else if (signal.kind === 'candidate') {
@@ -453,11 +458,15 @@ export function useLinkcast() {
   const startLoops = useCallback(() => {
     stopLoops();
     const generation = loopGenerationRef.current;
-    let queue = Promise.resolve();
+    const queues = new Map<string, Promise<void>>();
     transportRef.current?.subscribe(signal => {
-      queue = queue.then(async () => {
+      const queue = (queues.get(signal.senderId) || Promise.resolve()).then(async () => {
         if (generation === loopGenerationRef.current) await handleSignal(signal, generation);
       }).catch(() => setError(SIGNALING_RETRY_ERROR));
+      queues.set(signal.senderId, queue);
+      void queue.then(() => {
+        if (queues.get(signal.senderId) === queue) queues.delete(signal.senderId);
+      });
     });
   }, [handleSignal, stopLoops]);
 
@@ -465,7 +474,6 @@ export function useLinkcast() {
     setLaserStroke(null);
     laserChannels.current.forEach(channel => channel.close());
     laserChannels.current.clear();
-    pendingLaserStrokeRef.current = null;
     stopLoops();
     const currentRoom = roomIdRef.current;
     const currentPeer = peerIdRef.current;

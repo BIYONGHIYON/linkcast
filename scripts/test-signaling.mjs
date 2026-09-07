@@ -46,7 +46,7 @@ try {
   await new Promise(resolve => host.ws.once('close', resolve));
   const rehost = connect('host', host.peerId);
   assert.equal((await rehost.ready).type, 'ready');
-  const ended = wait(replacement.ws, m => m.kind === 'leave' && m.senderId === host.peerId);
+  const ended = wait(replacement.ws, m => m.kind === 'room_closed' && m.senderId === host.peerId);
   rehost.ws.send(JSON.stringify({ type: 'leave' }));
   await ended;
   const offline = connect('viewer');

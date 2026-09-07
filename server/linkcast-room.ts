@@ -2,6 +2,7 @@ import { DurableObject } from 'cloudflare:workers';
 
 type Peer = { id: string; role: 'host' | 'viewer'; seen: number; removed?: boolean };
 const LEASE_MS = 120_000;
+const SWEEP_MS = 300_000;
 
 export class LinkcastRoom extends DurableObject<unknown> {
   constructor(ctx: DurableObjectState, env: unknown) {
@@ -75,7 +76,7 @@ export class LinkcastRoom extends DurableObject<unknown> {
       } else if (reconnectingHost) {
         for (const viewer of this.peers().filter((ws) => this.peer(ws).role === 'viewer')) this.signal(viewer, id, 'host_restart');
       }
-      if (!(await this.ctx.storage.getAlarm())) await this.ctx.storage.setAlarm(Date.now() + LEASE_MS);
+      if (!(await this.ctx.storage.getAlarm())) await this.ctx.storage.setAlarm(Date.now() + SWEEP_MS);
       return new Response(null, { status: 101, webSocket: client });
     });
   }
@@ -104,6 +105,9 @@ export class LinkcastRoom extends DurableObject<unknown> {
     } catch { /* Invalid messages cannot change room membership. */ }
   }
   async webSocketClose(ws: WebSocket) {
+    return this.ctx.blockConcurrencyWhile(() => this.disconnect(ws));
+  }
+  private async disconnect(ws: WebSocket) {
     const peer = this.peer(ws);
     if (peer.removed) return;
     if (peer.role === 'host') {
@@ -119,6 +123,9 @@ export class LinkcastRoom extends DurableObject<unknown> {
   }
   async webSocketError(ws: WebSocket) { await this.webSocketClose(ws); }
   async alarm() {
+    return this.ctx.blockConcurrencyWhile(() => this.cleanup());
+  }
+  private async cleanup() {
     await this.sweep();
     if (!this.peers().some(ws => this.peer(ws).role === 'host')) {
       const gone = await this.ctx.storage.get<number>('hostGone');
@@ -129,6 +136,6 @@ export class LinkcastRoom extends DurableObject<unknown> {
       const host = await this.ctx.storage.get<string>('host');
       for (const ws of this.peers()) { this.signal(ws, host || '', 'room_closed'); this.remove(ws); }
       await this.ctx.storage.deleteAll();
-    } else await this.ctx.storage.setAlarm(Date.now() + LEASE_MS);
+    } else await this.ctx.storage.setAlarm(Date.now() + SWEEP_MS);
   }
 }

@@ -4,8 +4,15 @@ import ts from 'typescript';
 import WebSocket from 'ws';
 const origin = process.env.LINKCAST_TEST_ORIGIN || 'http://localhost:8799';
 globalThis.window = { location: { href: origin } };
+let failNextConnection = false;
 globalThis.WebSocket = class extends WebSocket {
-  constructor(url) { super(url, { origin }); }
+  constructor(url) {
+    super(url, { origin });
+    if (failNextConnection) {
+      failNextConnection = false;
+      this.once('open', () => this.terminate());
+    }
+  }
 };
 const source = await readFile(new URL('../hooks/signaling-socket.ts', import.meta.url), 'utf8');
 const compiled = ts.transpileModule(source, { compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.ES2022 } }).outputText;
@@ -31,14 +38,23 @@ try {
   await until(() => signals.some(s => s.kind === 'join'));
   await host.request('/api/signals', { method: 'POST', body: JSON.stringify({ recipientId: viewerId, kind: 'offer', payload: { sdp: 'buffered' } }) });
   await new Promise(resolve => setTimeout(resolve, 50));
-  viewer.subscribe(signal => signals.push(signal));
+  viewer.subscribe(signal => {
+    signals.push(signal);
+    if (signal.kind === 'host_restart') void viewer.request('/api/signals', { method: 'POST', body: JSON.stringify({ recipientId: hostId, kind: 'join', payload: { reset: true } }) });
+  });
   await until(() => signals.some(s => s.kind === 'offer'));
   assert.equal(JSON.parse(signals.find(s => s.kind === 'offer').payload).sdp, 'buffered');
   const count = signals.filter(s => s.kind === 'join').length;
+  failNextConnection = true;
   host.socket.terminate();
   await until(() => signals.filter(s => s.kind === 'join').length > count);
+  const offers = signals.filter(s => s.kind === 'offer').length;
+  viewer.socket.terminate();
+  await request(viewer, 'viewer', viewerId);
+  await host.request('/api/signals', { method: 'POST', body: JSON.stringify({ recipientId: viewerId, kind: 'offer', payload: { sdp: 'after-rejoin' } }) });
+  await until(() => signals.filter(s => s.kind === 'offer').length > offers);
   host.close();
-  await until(() => signals.some(s => s.kind === 'leave' && s.senderId === hostId));
+  await until(() => signals.some(s => s.kind === 'room_closed' && s.senderId === hostId));
   assert.equal(viewer.stopped, true);
   console.log('PASS: client admission, buffered signals, automatic host reconnect, room termination stops retries');
 } finally { host.close(); viewer.close(); }

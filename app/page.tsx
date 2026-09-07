@@ -112,6 +112,7 @@ export default function Home() {
   const [isPreviewing, setIsPreviewing] = useState(false);
   const [joinValue, setJoinValue] = useState('');
   const [copied, setCopied] = useState(false);
+  const [codeCopied, setCodeCopied] = useState(false);
   const [captureError, setCaptureError] = useState('');
   const [hostAudioEnabled, setHostAudioEnabled] = useState(true);
   const [playbackBlocked, setPlaybackBlocked] = useState(false);
@@ -319,9 +320,19 @@ export default function Home() {
 
   const copyLink = async () => {
     if (!shareUrl) return;
-    await navigator.clipboard.writeText(shareUrl);
-    setCopied(true);
-    window.setTimeout(() => setCopied(false), 1800);
+    try {
+      await navigator.clipboard.writeText(shareUrl);
+      setCopied(true);
+      window.setTimeout(() => setCopied(false), 1800);
+    } catch { setCaptureError('링크를 복사하지 못했어요. 표시된 링크를 선택해 복사해 주세요.'); }
+  };
+
+  const copyCode = async () => {
+    try {
+      await navigator.clipboard.writeText(roomId);
+      setCodeCopied(true);
+      window.setTimeout(() => setCodeCopied(false), 1800);
+    } catch { setCaptureError('코드를 복사하지 못했어요. 표시된 코드를 선택해 복사해 주세요.'); }
   };
 
   const changeMode = (nextMode: 'host' | 'viewer') => {
@@ -555,10 +566,10 @@ export default function Home() {
   const resolution =
     captureInfo.width && captureInfo.height
       ? `${captureInfo.width} × ${captureInfo.height}`
-      : '1920 × 1080 요청';
+      : '1920 × 1080';
   const frameRate = captureInfo.frameRate
     ? `${Math.round(captureInfo.frameRate)} fps`
-    : '60 fps 요청';
+    : '60 fps';
   const activeRoom = Boolean(roomId && status !== 'idle');
 
   return (
@@ -580,8 +591,7 @@ export default function Home() {
         <Tabs value={mode} onValueChange={(value) => changeMode(value as 'host' | 'viewer')} className="gap-6">
           <div className="flex flex-col gap-4 border-b border-border pb-4 sm:flex-row sm:items-end sm:justify-between">
             <div>
-              <p className="mb-1 text-sm text-muted-foreground">1080p · 60fps · WebRTC</p>
-              <h1 className="text-2xl font-semibold tracking-[-0.04em] sm:text-3xl">지연 없이, 링크 하나로.</h1>
+              <h1 className="text-2xl font-semibold tracking-[-0.04em] sm:text-3xl">지연 없이, 링크 하나로</h1>
             </div>
             <TabsList className="h-10 w-full rounded-full bg-muted/80 p-1 sm:w-auto">
               <TabsTrigger value="host" className="h-8 flex-1 rounded-full px-4 sm:flex-none">송출</TabsTrigger>
@@ -688,7 +698,11 @@ export default function Home() {
                     <div className="space-y-3">
                       <div className="flex items-center gap-2 rounded-2xl border border-border bg-muted/40 p-2 pl-3">
                         <p className="min-w-0 flex-1 truncate text-sm text-muted-foreground">{shareUrl}</p>
-                        <Button size="icon" variant="outline" onClick={() => void copyLink()} aria-label="송출 링크 복사" className="shrink-0 rounded-xl">{copied ? <Check /> : <Copy />}</Button>
+                        <Button onClick={() => void copyLink()} aria-label="송출 링크 복사" className="shrink-0 rounded-xl">{copied ? <Check /> : <Copy />}{copied ? '복사됨' : '링크 복사'}</Button>
+                      </div>
+                      <div className="flex items-center justify-between gap-2 text-sm text-muted-foreground">
+                        <span>참가 코드 <span className="select-all font-mono">{roomId}</span></span>
+                        <button type="button" onClick={() => void copyCode()} className="shrink-0 hover:text-foreground">{codeCopied ? '복사됨' : '코드만 복사'}</button>
                       </div>
                       <div className="flex items-center justify-between text-xs text-muted-foreground">
                         <span className="flex items-center gap-2"><Users className="size-3.5" /> {viewerCount}/5명 연결</span>
