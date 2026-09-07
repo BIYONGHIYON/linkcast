@@ -42,6 +42,9 @@ export function useVoiceChat() {
 
   const bindOutputElement = useCallback((element: HTMLMediaElement | null) => {
     videoOutput.current = element;
+    const audio = context.current as SinkableAudioContext | null;
+    const sink = (element as (HTMLMediaElement & { sinkId?: string }) | null)?.sinkId || '';
+    if (audio?.setSinkId) void audio.setSinkId(sink).catch(() => undefined);
   }, []);
 
   const resumePlayback = useCallback(async () => {
@@ -58,7 +61,7 @@ export function useVoiceChat() {
       // AudioContext.setSinkId is not supported everywhere. If copying the
       // video's output device fails, keep the system default instead of
       // preventing the call audio from playing at all.
-      if (sink && typeof sinkable.setSinkId === 'function') {
+      if (typeof sinkable.setSinkId === 'function') {
         await sinkable.setSinkId(sink).catch(() => undefined);
       }
       if (audio.state !== 'running') throw new Error('audio_context_suspended');

@@ -14,6 +14,15 @@ export function useCallPresence(local: State) {
   const state = useRef(local);
   const identity = useRef({ host: false, id: '' });
   const index = useRef(0);
+  const voiceListener = useRef<((sender: string, payload: unknown) => void) | null>(null);
+  const subscribeVoice = useCallback((listener: (sender: string, payload: unknown) => void) => {
+    voiceListener.current = listener;
+    return () => { if (voiceListener.current === listener) voiceListener.current = null; };
+  }, []);
+  const signalVoice = useCallback((recipient: string, payload: unknown) => {
+    if (identity.current.host) return;
+    channels.current.forEach(channel => send(channel, { type: 'voice-signal', recipient, payload }));
+  }, []);
   const publish = useCallback(() => {
     if (identity.current.host) {
       const roster = [{ ...state.current, id: identity.current.id, label: '송출자' }, ...peers.current.values()];
@@ -37,9 +46,18 @@ export function useCallPresence(local: State) {
     channel.onopen = publish;
     channel.onclose = () => { if (channels.current.get(id) === channel) remove(id); };
     channel.onmessage = event => {
-      if (channels.current.get(id) !== channel || typeof event.data !== 'string' || event.data.length > 8192) return;
+      if (channels.current.get(id) !== channel || typeof event.data !== 'string' || event.data.length > 65536) return;
       try {
         const message = JSON.parse(event.data);
+        if (message.type === 'voice-signal') {
+          if (host && typeof message.recipient === 'string' && message.recipient !== id) {
+            const target = channels.current.get(message.recipient);
+            if (target) send(target, { type: 'voice-signal', sender: id, payload: message.payload });
+          } else if (!host && typeof message.sender === 'string' && message.sender !== selfId) {
+            voiceListener.current?.(message.sender, message.payload);
+          }
+          return;
+        }
         if (host && message.type === 'state' && ['enabled', 'muted', 'speaking'].every(key => typeof message[key] === 'boolean')) {
           const previous = peers.current.get(id)!;
           peers.current.set(id, { ...previous, enabled: message.enabled, muted: message.muted, speaking: message.speaking });
@@ -56,5 +74,5 @@ export function useCallPresence(local: State) {
     channels.current.forEach(c => { c.onclose = null; c.close(); }); channels.current.clear(); peers.current.clear(); index.current = 0; setParticipants([]);
   }, []);
   useEffect(() => clear, [clear]);
-  return { participants, register, remove, clear };
+  return { participants, register, remove, clear, signalVoice, subscribeVoice };
 }

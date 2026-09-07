@@ -5,6 +5,7 @@ import { SignalingSocket } from './signaling-socket';
 import { useVoiceChat } from './use-voice-chat';
 import { useCallPresence } from './use-call-presence';
 import { useLaserStrokes } from './use-laser-strokes';
+import { useVoiceMesh } from './use-voice-mesh';
 
 type Role = 'host' | 'viewer';
 export type LaserPoint = { x: number; y: number };
@@ -63,10 +64,12 @@ function findVoiceTransceiver(connection: RTCPeerConnection, expectedMid?: strin
 
 export function useLinkcast() {
   const voice = useVoiceChat();
-  const { participants, register: registerPresence, remove: removePresence, clear: clearPresence } = useCallPresence({ enabled: voice.enabled, muted: voice.muted, speaking: voice.speaking });
+  const { participants, register: registerPresence, remove: removePresence, clear: clearPresence, signalVoice, subscribeVoice } = useCallPresence({ enabled: voice.enabled, muted: voice.muted, speaking: voice.speaking });
   const { attach: attachVoice, remove: removeVoice, stop: stopVoice, track: voiceTrack, subscribeTrack } = voice;
   const voiceTransceivers = useRef(new Map<string, RTCRtpTransceiver>());
   const voiceMids = useRef(new Map<string, string>());
+  const [meshIdentity, setMeshIdentity] = useState({ selfId: '', hostId: '' });
+  const replaceMeshTrack = useVoiceMesh({ ...meshIdentity, participants, track: voiceTrack, attach: attachVoice, remove: removeVoice, send: signalVoice, subscribe: subscribeVoice });
   useEffect(() => subscribeTrack(async next => {
     const replacements: Promise<void>[] = [];
     peerConnectionsRef.current.forEach((connection, peerId) => {
@@ -83,7 +86,8 @@ export function useLinkcast() {
       if (transceiver) replacements.push(transceiver.sender.replaceTrack(next));
     });
     await Promise.all(replacements);
-  }), [subscribeTrack]);
+    await replaceMeshTrack(next);
+  }), [subscribeTrack, replaceMeshTrack]);
   const transportRef = useRef<SignalingSocket | null>(null);
   const [status, setStatus] = useState<ConnectionStatus>('idle');
   const [roomId, setRoomId] = useState('');
@@ -553,6 +557,7 @@ export function useLinkcast() {
   }, [handleSignal, stopLoops]);
 
   const leave = useCallback(async () => {
+    setMeshIdentity({ selfId: '', hostId: '' });
     roomOperationRef.current++;
     clearPresence();
     stopVoice();
@@ -613,6 +618,7 @@ export function useLinkcast() {
         roomIdRef.current = nextRoomId;
         peerIdRef.current = peerId;
         hostIdRef.current = peerId;
+        setMeshIdentity({ selfId: peerId, hostId: peerId });
         await api<RoomResponse>('/api/rooms', {
           method: 'POST',
           body: JSON.stringify({ roomId: nextRoomId, peerId, role: 'host' }),
@@ -650,6 +656,7 @@ export function useLinkcast() {
         });
         if (operation !== roomOperationRef.current) return false;
         hostIdRef.current = room.hostId;
+        setMeshIdentity({ selfId: peerId, hostId: room.hostId });
         setRoomId(normalized);
         startLoops();
         return true;
