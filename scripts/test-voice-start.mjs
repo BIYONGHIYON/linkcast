@@ -28,21 +28,34 @@ function setup() {
     return [initial, next => { state[index] = typeof next === 'function' ? next(state[index]) : next; }];
   } };
   const exports = {};
+  const playback = [];
   runInNewContext(compiled, { exports, require: () => hooks, AudioContext,
+    Audio: class {
+      constructor() { playback.push(this); }
+      setAttribute() {}
+      play() { this.played = true; return Promise.resolve(); }
+      pause() { this.paused = true; }
+      setSinkId(id) { this.sinkId = id; return Promise.resolve(); }
+    },
     AudioWorkletNode: class { parameters = new Map([['threshold', { value: 0 }]]); port = {}; disconnect() {} connect(target) { return target; } },
     navigator: { mediaDevices: { getUserMedia: async () => stream, enumerateDevices: async () => [] } },
   });
-  return { voice: exports.useVoiceChat(), state, microphone };
+  return { voice: exports.useVoiceChat(), state, microphone, playback };
 }
 {
-  const { voice, state, microphone } = setup();
+  const { voice, state, microphone, playback } = setup();
+  voice.bindOutputElement({ sinkId: 'same-as-video-output' });
   let published;
   voice.subscribeTrack(async track => { published = track; assert.equal(track?.getSettings().channelCount, 1); });
   await voice.start();
   assert.ok(published);
   assert.equal(state[0], true, 'show joined only after sender accepts track');
+  assert.equal(playback[0].sinkId, 'same-as-video-output');
+  assert.equal(playback[0].played, true);
   voice.stop();
   assert.equal(microphone.stopped, true);
+  assert.equal(playback[0].paused, true);
+  assert.equal(playback[0].srcObject, null);
 }
 {
   const { voice, state, microphone } = setup();

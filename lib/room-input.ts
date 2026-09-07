@@ -14,3 +14,11 @@ export function normalizeRoomValue(value: string): string {
   if (!/^[a-zA-Z0-9_-]{8,80}$/.test(room)) return '';
   return /^[a-f0-9]{12}$/i.test(room) ? room.toLowerCase() : room;
 }
+
+export function createRoomLink(currentUrl: string, roomId: string): string {
+  const room = normalizeRoomValue(roomId);
+  if (!room) throw new Error('invalid_room');
+  const url = new URL('/', currentUrl);
+  url.search = new URLSearchParams({ room, mode: 'viewer' }).toString();
+  return url.href;
+}

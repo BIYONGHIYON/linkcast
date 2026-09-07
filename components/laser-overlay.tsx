@@ -1,16 +1,24 @@
 'use client';
 
-import { useEffect, useRef, useState, type PointerEvent } from 'react';
-import type { LaserPoint, LaserStroke } from '@/hooks/use-linkcast';
+import { useEffect, useRef, useState, type PointerEvent, type ReactNode } from 'react';
+import type { LaserPoint } from '@/hooks/use-linkcast';
+import { LASER_DURATION_MS, type VisibleLaserStroke } from '@/hooks/use-laser-strokes';
 
-export function LaserOverlay({ ratio, stroke, onSend }: { ratio: number; stroke: LaserStroke | null; onSend: (points: LaserPoint[]) => void }) {
+function FadingStroke({ stroke, children }: { stroke: VisibleLaserStroke; children: ReactNode }) {
+  const element = useRef<SVGGElement>(null);
+  useEffect(() => {
+    const animation = element.current?.animate([{ opacity: 1 }, { opacity: 1, offset: 0.6 }, { opacity: 0 }], { duration: LASER_DURATION_MS, fill: 'forwards' });
+    if (animation) animation.currentTime = Math.max(0, Date.now() - stroke.shownAt);
+    return () => animation?.cancel();
+  }, [stroke.id, stroke.shownAt]);
+  return <g ref={element} pointerEvents="none">{children}</g>;
+}
+
+export function LaserOverlay({ ratio, strokes, onSend }: { ratio: number; strokes: VisibleLaserStroke[]; onSend: (points: LaserPoint[]) => void }) {
   const root = useRef<HTMLDivElement>(null);
   const active = useRef<{ pointerId: number; points: LaserPoint[] } | null>(null);
   const releaseListeners = useRef<(() => void) | null>(null);
   const [draft, setDraft] = useState<LaserPoint[]>([]);
-  const [expiredId, setExpiredId] = useState<string | null>(null);
-  const fading = useRef<SVGGElement>(null);
-  const visible = stroke?.id !== expiredId ? stroke : null;
   const [size, setSize] = useState({ width: 0, height: 0 });
   useEffect(() => () => { releaseListeners.current?.(); active.current = null; }, []);
   useEffect(() => {
@@ -23,11 +31,6 @@ export function LaserOverlay({ ratio, stroke, onSend }: { ratio: number; stroke:
     observer.observe(element);
     return () => observer.disconnect();
   }, [ratio]);
-  useEffect(() => {
-    const animation = fading.current?.animate([{ opacity: 1 }, { opacity: 1, offset: 0.6 }, { opacity: 0 }], { duration: 2500, fill: 'forwards' });
-    const timer = window.setTimeout(() => setExpiredId(stroke?.id || null), 2500);
-    return () => { window.clearTimeout(timer); animation?.cancel(); };
-  }, [stroke]);
   const point = (event: { clientX: number; clientY: number }, element: SVGSVGElement): LaserPoint => {
     const rect = element.getBoundingClientRect();
     return { x: Math.max(0, Math.min(1, (event.clientX - rect.left) / rect.width)), y: Math.max(0, Math.min(1, (event.clientY - rect.top) / rect.height)) };
@@ -112,7 +115,7 @@ export function LaserOverlay({ ratio, stroke, onSend }: { ratio: number; stroke:
       onPointerCancel={event => finish(event.pointerId)}
       >
       <rect width="100%" height="100%" fill="transparent" />
-      <g key={stroke?.id} ref={fading}>{visible && draw(visible.points)}</g>
+      {strokes.map(stroke => <FadingStroke key={stroke.id} stroke={stroke}>{draw(stroke.points)}</FadingStroke>)}
       {draw(draft)}
     </svg>
   </div>;

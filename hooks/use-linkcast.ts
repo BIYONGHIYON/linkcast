@@ -4,6 +4,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { SignalingSocket } from './signaling-socket';
 import { useVoiceChat } from './use-voice-chat';
 import { useCallPresence } from './use-call-presence';
+import { useLaserStrokes } from './use-laser-strokes';
 
 type Role = 'host' | 'viewer';
 export type LaserPoint = { x: number; y: number };
@@ -65,7 +66,7 @@ export function useLinkcast() {
     transport.onStatus = connected => setError(current => connected ? (current === SIGNALING_RETRY_ERROR ? '' : current) : SIGNALING_RETRY_ERROR);
     return transport.request<T>(path, init);
   }, []);
-  const [laserStroke, setLaserStroke] = useState<LaserStroke | null>(null);
+  const { strokes: laserStrokes, add: addLaserStroke, clear: clearLaserStrokes } = useLaserStrokes();
   const laserChannels = useRef(new Map<string, RTCDataChannel>());
   const broadcastLaserStroke = useCallback((stroke: LaserStroke, excludedPeerId?: string) => {
     const message = JSON.stringify(stroke);
@@ -78,9 +79,9 @@ export function useLinkcast() {
   }, []);
   const sendLaserStroke = useCallback((points: LaserPoint[]) => {
     const stroke = { id: crypto.randomUUID(), points: points.slice(0, 512).map(p => ({ x: Math.round(p.x * 10000) / 10000, y: Math.round(p.y * 10000) / 10000 })) };
-    setLaserStroke(stroke);
+    addLaserStroke(stroke);
     broadcastLaserStroke(stroke);
-  }, [broadcastLaserStroke]);
+  }, [addLaserStroke, broadcastLaserStroke]);
 
   const roleRef = useRef<Role | null>(null);
   const roomIdRef = useRef('');
@@ -97,6 +98,7 @@ export function useLinkcast() {
   const viewerRecoveryRef = useRef(false);
   const viewerRecoveryTimerRef = useRef<number | null>(null);
   const viewerReconnectAttemptsRef = useRef(0);
+  const roomOperationRef = useRef(0);
 
   const sendSignal = useCallback(
     async (recipientId: string, kind: 'join' | 'offer' | 'answer' | 'candidate', payload: unknown) => {
@@ -224,7 +226,7 @@ export function useLinkcast() {
         try {
           const stroke = JSON.parse(event.data) as LaserStroke;
           if (typeof stroke.id !== 'string' || stroke.id.length > 64 || !Array.isArray(stroke.points) || !stroke.points.length || stroke.points.length > 512 || !stroke.points.every(p => p && Number.isFinite(p.x) && Number.isFinite(p.y) && p.x >= 0 && p.x <= 1 && p.y >= 0 && p.y <= 1)) return;
-          setLaserStroke(stroke);
+          addLaserStroke(stroke);
           if (roleRef.current === 'host') broadcastLaserStroke(stroke, remotePeerId);
         } catch { /* Ignore invalid pointer messages. */ }
       };
@@ -330,7 +332,7 @@ export function useLinkcast() {
 
       return connection;
     },
-    [registerPresence, attachVoice, voiceTrack, broadcastLaserStroke, closePeer, scheduleViewerReconnect, sendSignal],
+    [addLaserStroke, registerPresence, attachVoice, voiceTrack, broadcastLaserStroke, closePeer, scheduleViewerReconnect, sendSignal],
   );
 
   const handleSignal = useCallback(
@@ -503,12 +505,13 @@ export function useLinkcast() {
   }, [handleSignal, stopLoops]);
 
   const leave = useCallback(async () => {
+    roomOperationRef.current++;
     clearPresence();
     stopVoice();
     voiceTransceivers.current.clear();
     voiceMids.current.clear();
     peerConnectionsRef.current.forEach((_, id) => removeVoice(id));
-    setLaserStroke(null);
+    clearLaserStrokes();
     laserChannels.current.forEach(channel => channel.close());
     laserChannels.current.clear();
     stopLoops();
@@ -546,11 +549,12 @@ export function useLinkcast() {
         keepalive: true,
       }).catch(() => undefined);
     }
-  }, [api, stopLoops, stopVoice, removeVoice, clearPresence]);
+  }, [api, stopLoops, stopVoice, removeVoice, clearPresence, clearLaserStrokes]);
 
   const createRoom = useCallback(
     async (stream: MediaStream) => {
       await leave();
+      const operation = roomOperationRef.current;
       setStatus('creating');
       setError('');
       const nextRoomId = randomId().slice(0, 12);
@@ -565,11 +569,13 @@ export function useLinkcast() {
           method: 'POST',
           body: JSON.stringify({ roomId: nextRoomId, peerId, role: 'host' }),
         });
+        if (operation !== roomOperationRef.current) return null;
         setRoomId(nextRoomId);
         setStatus('waiting');
         startLoops();
         return nextRoomId;
       } catch {
+        if (operation !== roomOperationRef.current) return null;
         setStatus('failed');
         setError('방을 만들지 못했어요. 잠시 후 다시 시도해 주세요.');
         return null;
@@ -581,6 +587,7 @@ export function useLinkcast() {
   const joinRoom = useCallback(
     async (targetRoomId: string) => {
       await leave();
+      const operation = roomOperationRef.current;
       const normalized = targetRoomId.trim();
       const peerId = randomId();
       setStatus('connecting');
@@ -593,11 +600,13 @@ export function useLinkcast() {
           method: 'POST',
           body: JSON.stringify({ roomId: normalized, peerId, role: 'viewer' }),
         });
+        if (operation !== roomOperationRef.current) return false;
         hostIdRef.current = room.hostId;
         setRoomId(normalized);
         startLoops();
         return true;
       } catch (reason) {
+        if (operation !== roomOperationRef.current) return false;
         const name = reason instanceof Error ? reason.name : '';
         if (name === 'room_full') {
           setStatus('full');
@@ -636,7 +645,7 @@ export function useLinkcast() {
 
   return {
     voice: { ...voice, participants },
-    laserStroke,
+    laserStrokes,
     sendLaserStroke,
     status,
     roomId,

@@ -10,6 +10,10 @@ export function useVoiceChat() {
   const [level, setLevel] = useState(0);
   const [speaking, setSpeaking] = useState(false);
   const [error, setError] = useState('');
+  const [playbackBlocked, setPlaybackBlocked] = useState(false);
+  const player = useRef<HTMLAudioElement | null>(null);
+  const videoOutput = useRef<HTMLMediaElement | null>(null);
+  const inputGraph = useRef<AudioNode[]>([]);
   const [devices, setDevices] = useState<MediaDeviceInfo[]>([]);
   const [device, setDevice] = useState('');
   const track = useRef<MediaStreamTrack | null>(null);
@@ -25,6 +29,17 @@ export function useVoiceChat() {
   const generation = useRef(0);
   const volumeRef = useRef(volume);
   const sensitivityRef = useRef(sensitivity);
+  const bindOutputElement = useCallback((element: HTMLMediaElement | null) => { videoOutput.current = element; }, []);
+  const resumePlayback = useCallback(async () => {
+    try {
+      await context.current?.resume();
+      const sink = (videoOutput.current as (HTMLMediaElement & { sinkId?: string }) | null)?.sinkId || '';
+      const audio = player.current as (HTMLAudioElement & { setSinkId?: (id: string) => Promise<void> }) | null;
+      if (audio?.setSinkId) await audio.setSinkId(sink);
+      await audio?.play();
+      setPlaybackBlocked(false);
+    } catch { setPlaybackBlocked(true); }
+  }, []);
   const subscribeTrack = useCallback(
     (listener: (track: MediaStreamTrack | null) => void | Promise<void>) => {
       onTrack.current = listener;
@@ -62,6 +77,8 @@ export function useVoiceChat() {
     gate.current = null;
     sources.current.forEach((s) => s.disconnect());
     sources.current.clear();
+    inputGraph.current.forEach(node => node.disconnect()); inputGraph.current = [];
+    if (player.current) { player.current.pause(); player.current.srcObject = null; player.current = null; }
     void context.current?.close().catch(() => undefined);
     context.current = null;
     output.current = null;
@@ -70,6 +87,7 @@ export function useVoiceChat() {
     setBusy(false);
     setLevel(0);
     setSpeaking(false);
+    setPlaybackBlocked(false);
   }, []);
   const start = useCallback(async () => {
     if (context.current) return;
@@ -79,7 +97,20 @@ export function useVoiceChat() {
     try {
       const audio = new AudioContext({ latencyHint: 'interactive' });
       context.current = audio;
+      const playbackDestination = audio.createMediaStreamDestination();
+      output.current = audio.createGain();
+      output.current.gain.value = volumeRef.current / 100;
+      output.current.connect(playbackDestination);
+      const playback = new Audio();
+      playback.setAttribute('playsinline', '');
+      playback.srcObject = playbackDestination.stream;
+      player.current = playback;
+      inputGraph.current = [playbackDestination];
+      // Unlock the media element from the actual call-button gesture, before permission awaits.
+      void playback.play().catch(() => { if (token === generation.current) setPlaybackBlocked(true); });
       await audio.resume();
+      await resumePlayback();
+      if (token !== generation.current) return;
       const stream = await navigator.mediaDevices.getUserMedia({
         audio: {
           deviceId: device ? { exact: device } : undefined,
@@ -111,13 +142,9 @@ export function useVoiceChat() {
       const destination = audio.createMediaStreamDestination();
       // WebAudio destinations default to stereo; the negotiated microphone is mono.
       destination.channelCount = 1;
-      audio
-        .createMediaStreamSource(stream)
-        .connect(processor)
-        .connect(destination);
-      output.current = audio.createGain();
-      output.current.gain.value = volumeRef.current / 100;
-      output.current.connect(audio.destination);
+      const microphoneSource = audio.createMediaStreamSource(stream);
+      microphoneSource.connect(processor).connect(destination);
+      inputGraph.current.push(microphoneSource, destination);
       receivers.current.forEach((t, id) => attach(id, t));
       track.current = destination.stream.getAudioTracks()[0];
       stream.getAudioTracks()[0].onended = () => {
@@ -142,7 +169,7 @@ export function useVoiceChat() {
     } finally {
       if (token === generation.current) setBusy(false);
     }
-  }, [attach, device, stop]);
+  }, [attach, device, stop, resumePlayback]);
   const toggleMute = useCallback(() => {
     setMuted((current) => {
       raw.current?.getAudioTracks().forEach((t) => {
@@ -198,5 +225,8 @@ export function useVoiceChat() {
     subscribeTrack,
     attach,
     remove,
+    playbackBlocked,
+    resumePlayback,
+    bindOutputElement,
   };
 }

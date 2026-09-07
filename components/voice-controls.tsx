@@ -80,6 +80,7 @@ export function VoiceControls({
           {voice.error}
         </p>
       )}
+      {voice.enabled && voice.playbackBlocked && <Button variant="outline" onClick={() => void voice.resumePlayback()} className="mt-3 w-full">통화 소리 재생</Button>}
       <details className="mt-3 border-t border-border pt-3">
         <summary className="cursor-pointer text-sm text-muted-foreground">
           <SlidersHorizontal className="mr-2 inline size-3.5" />

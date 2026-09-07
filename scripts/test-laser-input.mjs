@@ -19,12 +19,21 @@ const fakeWindow = {
   addEventListener: (kind, handler) => listeners.set(kind, handler),
   removeEventListener: (kind, handler) => { if (listeners.get(kind) === handler) listeners.delete(kind); },
 };
-runInNewContext(compiled, { window: fakeWindow, require: name => name === 'react' ? hooks : require(name), module: compiledModule, exports: compiledModule.exports });
+runInNewContext(compiled, {
+  window: fakeWindow,
+  require: name => name === 'react'
+    ? hooks
+    : name === '@/hooks/use-laser-strokes'
+      ? { LASER_DURATION_MS: 2500 }
+      : require(name),
+  module: compiledModule,
+  exports: compiledModule.exports,
+});
 const target = { setPointerCapture() {}, getBoundingClientRect: () => ({ left: 0, top: 0, width: 640, height: 360 }) };
 const event = (x, pointerId = 1) => ({ pointerId, pointerType: 'touch', button: 0, clientX: x, clientY: 80, currentTarget: target, nativeEvent: {}, preventDefault() {} });
 for (const ending of ['onPointerUp', 'onPointerCancel', 'windowRelease']) {
   const sent = [];
-  const tree = compiledModule.exports.LaserOverlay({ ratio: 16 / 9, stroke: null, onSend: points => sent.push(points) });
+  const tree = compiledModule.exports.LaserOverlay({ ratio: 16 / 9, strokes: [], onSend: points => sent.push(points) });
   const handlers = tree.props.children.props;
   handlers.onPointerDown(event(20));
   handlers.onPointerMove(event(100));
@@ -39,7 +48,7 @@ for (const ending of ['onPointerUp', 'onPointerCancel', 'windowRelease']) {
 }
 for (const captureFails of [false, true]) {
   const sent = [];
-  const handlers = compiledModule.exports.LaserOverlay({ ratio: 16 / 9, stroke: null, onSend: p => sent.push(p) }).props.children.props;
+  const handlers = compiledModule.exports.LaserOverlay({ ratio: 16 / 9, strokes: [], onSend: p => sent.push(p) }).props.children.props;
   const start = event(20);
   start.pointerType = 'mouse';
   if (captureFails) start.currentTarget = { ...target, setPointerCapture() { throw new Error('capture failed'); } };
@@ -56,7 +65,7 @@ for (const captureFails of [false, true]) {
 for (const duration of [0, 1, 5, 10, 16]) {
   for (const moveArrives of [false, true]) {
     const sent = [];
-    const handlers = compiledModule.exports.LaserOverlay({ ratio: 16 / 9, stroke: null, onSend: p => sent.push(p) }).props.children.props;
+    const handlers = compiledModule.exports.LaserOverlay({ ratio: 16 / 9, strokes: [], onSend: p => sent.push(p) }).props.children.props;
     const mouse = (x, timeStamp) => ({ ...event(x), pointerType: 'mouse', timeStamp });
     handlers.onPointerDown(mouse(20, 100));
     if (moveArrives) handlers.onPointerMove(mouse(300, 100 + duration / 2));

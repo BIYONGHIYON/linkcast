@@ -30,7 +30,7 @@ import {
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { useLinkcast } from '@/hooks/use-linkcast';
 import { LaserOverlay } from '@/components/laser-overlay';
-import { normalizeRoomValue } from '@/lib/room-input';
+import { createRoomLink, normalizeRoomValue } from '@/lib/room-input';
 import { VoiceControls } from '@/components/voice-controls';
 
 type DeviceOption = { deviceId: string; label: string };
@@ -101,6 +101,8 @@ export default function Home() {
   const streamRef = useRef<MediaStream | null>(null);
   const autoJoinRef = useRef('');
   const joiningRef = useRef<Promise<boolean> | null>(null);
+  const joiningRoomRef = useRef('');
+  const creatingRef = useRef<Promise<string | null> | null>(null);
   const [mode, setMode] = useState<'host' | 'viewer'>('host');
   const [videoDevices, setVideoDevices] = useState<DeviceOption[]>([]);
   const [audioDevices, setAudioDevices] = useState<DeviceOption[]>([]);
@@ -124,7 +126,7 @@ export default function Home() {
 
   const {
     voice,
-    laserStroke,
+    laserStrokes,
     sendLaserStroke,
     status,
     roomId,
@@ -138,8 +140,13 @@ export default function Home() {
 
   const shareUrl = useMemo(() => {
     if (!roomId || typeof window === 'undefined') return '';
-    return `${window.location.origin}/?room=${roomId}&mode=viewer`;
+    return createRoomLink(window.location.href, roomId);
   }, [roomId]);
+
+  const { bindOutputElement } = voice;
+  useEffect(() => {
+    bindOutputElement(mode === 'host' ? previewVideoRef.current : viewerVideoRef.current);
+  }, [mode, roomId, remoteStream, bindOutputElement]);
 
   const stopPreview = useCallback(() => {
     void leave();
@@ -238,12 +245,19 @@ export default function Home() {
     async (value: string) => {
       const normalized = normalizeRoomValue(value);
       if (!normalized) return false;
-      if (joiningRef.current) return joiningRef.current;
+      if (joiningRef.current && joiningRoomRef.current === normalized) return joiningRef.current;
+      joiningRoomRef.current = normalized;
       setJoinValue(normalized);
       setMode('viewer');
       autoJoinRef.current = normalized;
       // Joining must not also trigger router navigation and effect cleanup.
-      const pending = joinRoom(normalized);
+      const pending = joinRoom(normalized).then(connected => {
+        if (connected && joiningRoomRef.current === normalized) {
+          // A code join after an old link must also replace that old address.
+          window.history.replaceState(window.history.state, '', createRoomLink(window.location.href, normalized));
+        }
+        return connected;
+      });
       joiningRef.current = pending;
       void pending.finally(() => {
         if (joiningRef.current === pending) joiningRef.current = null;
@@ -321,10 +335,19 @@ export default function Home() {
   }, []);
 
   const createShareLink = useCallback(async () => {
+    if (creatingRef.current) return creatingRef.current;
     if (!streamRef.current) return null;
-    const createdRoomId = await createRoom(streamRef.current);
-    setCopied(false);
-    return createdRoomId;
+    const pending = createRoom(streamRef.current).then(createdRoomId => {
+      if (createdRoomId) {
+        autoJoinRef.current = createdRoomId;
+        window.history.replaceState(window.history.state, '', createRoomLink(window.location.href, createdRoomId));
+      }
+      setCopied(false); setCodeCopied(false);
+      return createdRoomId;
+    });
+    creatingRef.current = pending;
+    try { return await pending; }
+    finally { if (creatingRef.current === pending) creatingRef.current = null; }
   }, [createRoom]);
 
   const copyLink = async () => {
@@ -537,7 +560,7 @@ export default function Home() {
             if (!createdRoomId) throw new Error('방을 만들지 못했어요.');
             return {
               roomId: createdRoomId,
-              shareUrl: `${window.location.origin}/?room=${createdRoomId}&mode=viewer`,
+              shareUrl: createRoomLink(window.location.href, createdRoomId),
             };
           },
         },
@@ -628,7 +651,7 @@ export default function Home() {
                   </div>
                 )}
 
-                {isPreviewing && <LaserOverlay ratio={hostAspectRatio || 16 / 9} stroke={laserStroke} onSend={sendLaserStroke} />}
+                {isPreviewing && <LaserOverlay ratio={hostAspectRatio || 16 / 9} strokes={laserStrokes} onSend={sendLaserStroke} />}
                 {activeRoom && isHostFullscreen && showHostControls && <div className="absolute inset-x-3 bottom-20 z-20 mx-auto max-h-[60dvh] max-w-2xl overflow-y-auto"><VoiceControls voice={voice} host /></div>}
                 {isHostFullscreen && <button type="button" aria-label="영상 메뉴 열기" onClick={revealHostControls} className="absolute bottom-4 right-4 z-10 h-11 w-11 rounded-full bg-black/35 text-xl text-white">···</button>}
                 {(!isHostFullscreen || showHostControls) && (
@@ -740,7 +763,7 @@ export default function Home() {
                     </div>
                   </div>
                 )}
-                {remoteStream && viewerVideoReady && <LaserOverlay ratio={viewerAspectRatio || 16 / 9} stroke={laserStroke} onSend={sendLaserStroke} />}
+                {remoteStream && viewerVideoReady && <LaserOverlay ratio={viewerAspectRatio || 16 / 9} strokes={laserStrokes} onSend={sendLaserStroke} />}
                 {isViewerFullscreen && showViewerControls && <div className="absolute inset-x-3 bottom-20 z-20 mx-auto max-h-[60dvh] max-w-2xl overflow-y-auto"><VoiceControls voice={voice} host={false} /></div>}
                 {isViewerFullscreen && <button type="button" aria-label="영상 메뉴 열기" onClick={revealViewerControls} className="absolute bottom-4 right-4 z-10 h-11 w-11 rounded-full bg-black/35 text-xl text-white">···</button>}
                 {(!isViewerFullscreen || showViewerControls) && (
