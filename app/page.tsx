@@ -204,9 +204,12 @@ export default function Home() {
             frameRate: { ideal: 60, max: 60 },
             ...(videoDeviceId ? { deviceId: { exact: videoDeviceId } } : {}),
           },
-          audio: audioDeviceId
-            ? { deviceId: { exact: audioDeviceId }, echoCancellation: false }
-            : true,
+          audio: {
+            ...(audioDeviceId ? { deviceId: { exact: audioDeviceId } } : {}),
+            echoCancellation: false,
+            noiseSuppression: false,
+            autoGainControl: false,
+          },
         });
         streamRef.current = stream;
         if (previewVideoRef.current) {
