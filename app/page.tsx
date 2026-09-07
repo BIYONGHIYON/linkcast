@@ -653,7 +653,7 @@ export default function Home() {
 
                 {isPreviewing && <LaserOverlay ratio={hostAspectRatio || 16 / 9} strokes={laserStrokes} onSend={sendLaserStroke} />}
                 {activeRoom && isHostFullscreen && showHostControls && <div className="absolute inset-x-3 bottom-20 z-20 mx-auto max-h-[60dvh] max-w-2xl overflow-y-auto"><VoiceControls voice={voice} host /></div>}
-                {isHostFullscreen && <button type="button" aria-label="영상 메뉴 열기" onClick={revealHostControls} className="absolute bottom-4 right-4 z-10 h-11 w-11 rounded-full bg-black/35 text-xl text-white">···</button>}
+                {isHostFullscreen && <button type="button" aria-label="영상 메뉴 열기" onClick={revealHostControls} className="absolute bottom-2 right-4 z-10 h-11 w-11 rounded-full bg-black/35 text-xl text-white">···</button>}
                 {(!isHostFullscreen || showHostControls) && (
                   <div className="absolute inset-x-0 top-0 flex items-center justify-between p-4 sm:p-5">
                     <span className="rounded-full border border-white/10 bg-black/35 px-3 py-1.5 text-xs font-medium text-white/80 backdrop-blur-md">
@@ -765,7 +765,7 @@ export default function Home() {
                 )}
                 {remoteStream && viewerVideoReady && <LaserOverlay ratio={viewerAspectRatio || 16 / 9} strokes={laserStrokes} onSend={sendLaserStroke} />}
                 {isViewerFullscreen && showViewerControls && <div className="absolute inset-x-3 bottom-20 z-20 mx-auto max-h-[60dvh] max-w-2xl overflow-y-auto"><VoiceControls voice={voice} host={false} /></div>}
-                {isViewerFullscreen && <button type="button" aria-label="영상 메뉴 열기" onClick={revealViewerControls} className="absolute bottom-4 right-4 z-10 h-11 w-11 rounded-full bg-black/35 text-xl text-white">···</button>}
+                {isViewerFullscreen && <button type="button" aria-label="영상 메뉴 열기" onClick={revealViewerControls} className="absolute bottom-2 right-4 z-10 h-11 w-11 rounded-full bg-black/35 text-xl text-white">···</button>}
                 {(!isViewerFullscreen || showViewerControls) && (
                   <div className="absolute inset-x-0 top-0 flex items-center justify-between p-4 sm:p-5">
                     <span className="rounded-full border border-white/10 bg-black/35 px-3 py-1.5 text-xs font-medium text-white/80 backdrop-blur-md">{status === 'connected' ? 'LIVE' : 'CONNECTING'}</span>

@@ -85,6 +85,7 @@ export function useVoiceChat() {
     if (!context.current || !output.current || incoming.kind !== 'audio' || incoming.readyState === 'ended') {
       return;
     }
+    incoming.enabled = true;
 
     // Play remote voice directly through the active AudioContext. The old
     // MediaStreamDestination -> detached <audio> path could be blocked or
@@ -92,7 +93,8 @@ export function useVoiceChat() {
     const source = context.current.createMediaStreamSource(new MediaStream([incoming]));
     source.connect(output.current);
     sources.current.set(id, source);
-  }, []);
+    if (context.current.state !== 'running') void resumePlayback();
+  }, [resumePlayback]);
 
   const remove = useCallback((id: string) => {
     sources.current.get(id)?.disconnect();
@@ -160,6 +162,7 @@ export function useVoiceChat() {
         stream.getTracks().forEach((current) => current.stop());
         return;
       }
+      await resumePlayback();
 
       const microphoneTrack = stream.getAudioTracks()[0];
       if (!microphoneTrack) throw new Error('microphone_track_missing');
