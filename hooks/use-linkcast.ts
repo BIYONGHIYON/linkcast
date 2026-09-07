@@ -26,6 +26,11 @@ type Signal = {
   payload: string;
 };
 
+type PendingSignalQueue = {
+  pending: Signal[];
+  running: boolean;
+};
+
 type RoomResponse = {
   roomId: string;
   hostId: string;
@@ -39,10 +44,75 @@ const rtcConfiguration: RTCConfiguration = {
 
 const SIGNALING_RETRY_ERROR = '연결 서버에 닿지 못했어요. 다시 연결하고 있습니다.';
 const VIDEO_MAX_BITRATE = 12_000_000;
+const VIDEO_TOTAL_BITRATE = 16_000_000;
+const VIDEO_MIN_BITRATE = 3_500_000;
+const MAX_SIGNAL_BACKLOG = 128;
+const MAX_QUEUED_ICE_CANDIDATES = 128;
 const MAX_VIEWERS = 5;
 
 function randomId() {
   return crypto.randomUUID().replaceAll('-', '');
+}
+
+async function configureVideoSender(sender: RTCRtpSender, maxBitrate: number) {
+  try {
+    const parameters = sender.getParameters();
+    parameters.encodings = parameters.encodings.length ? parameters.encodings : [{}];
+    parameters.degradationPreference = 'maintain-resolution';
+    parameters.encodings[0].maxBitrate = maxBitrate;
+    parameters.encodings[0].maxFramerate = 60;
+    parameters.encodings[0].scaleResolutionDownBy = 1;
+    await sender.setParameters(parameters);
+  } catch {
+    // Some browsers reject degradationPreference before the first negotiation.
+    // Keep the bitrate/framerate cap as the safe fallback.
+    try {
+      const fallback = sender.getParameters();
+      fallback.encodings = fallback.encodings.length ? fallback.encodings : [{}];
+      fallback.encodings[0].maxBitrate = maxBitrate;
+      fallback.encodings[0].maxFramerate = 60;
+      fallback.encodings[0].scaleResolutionDownBy = 1;
+      await sender.setParameters(fallback);
+    } catch {
+      // The peer may have closed while parameters were being updated.
+    }
+  }
+}
+
+function drainSignalQueue(
+  senderId: string,
+  queue: PendingSignalQueue,
+  queues: Map<string, PendingSignalQueue>,
+  generation: number,
+  generationRef: { current: number },
+  handleSignal: (signal: Signal, generation: number) => Promise<void>,
+  onError: () => void,
+) {
+  if (queue.running) return;
+  queue.running = true;
+  void (async () => {
+    try {
+      while (queue.pending.length && generation === generationRef.current) {
+        const signal = queue.pending.shift();
+        if (!signal) continue;
+        try {
+          await handleSignal(signal, generation);
+        } catch {
+          // One malformed or stale signal must not reject the whole queue.
+          onError();
+        }
+      }
+    } catch {
+      onError();
+    }
+    queue.running = false;
+    if (queues.get(senderId) !== queue) return;
+    if (generation !== generationRef.current || !queue.pending.length) {
+      queues.delete(senderId);
+      return;
+    }
+    drainSignalQueue(senderId, queue, queues, generation, generationRef, handleSignal, onError);
+  })();
 }
 
 function findVoiceTransceiver(connection: RTCPeerConnection, expectedMid?: string) {
@@ -128,6 +198,27 @@ export function useLinkcast() {
   const viewerRecoveryTimerRef = useRef<number | null>(null);
   const viewerReconnectAttemptsRef = useRef(0);
   const roomOperationRef = useRef(0);
+  const videoSendersRef = useRef(new Map<string, RTCRtpSender>());
+
+  const applyVideoBudget = useCallback(async () => {
+    const senders = [...videoSendersRef.current.values()];
+    if (!senders.length) return;
+
+    // P2P fan-out multiplies the host's upload traffic. Keep a bounded total
+    // budget so a second or third viewer cannot build an encoder/network queue.
+    const perPeerBitrate = Math.max(
+      VIDEO_MIN_BITRATE,
+      Math.min(VIDEO_MAX_BITRATE, Math.floor(VIDEO_TOTAL_BITRATE / senders.length)),
+    );
+    await Promise.all(senders.map((sender) => configureVideoSender(sender, perPeerBitrate)));
+  }, []);
+
+  const queueCandidate = useCallback((peerId: string, candidate: RTCIceCandidateInit) => {
+    const queue = candidateQueuesRef.current.get(peerId) || [];
+    if (queue.length >= MAX_QUEUED_ICE_CANDIDATES) return;
+    queue.push(candidate);
+    candidateQueuesRef.current.set(peerId, queue);
+  }, []);
 
   const sendSignal = useCallback(
     async (recipientId: string, kind: 'join' | 'offer' | 'answer' | 'candidate', payload: unknown) => {
@@ -151,9 +242,7 @@ export function useLinkcast() {
   const flushCandidates = useCallback(async (peerId: string, connection: RTCPeerConnection) => {
     const queued = candidateQueuesRef.current.get(peerId) || [];
     candidateQueuesRef.current.delete(peerId);
-    for (const candidate of queued) {
-      await connection.addIceCandidate(candidate).catch(() => undefined);
-    }
+    await Promise.all(queued.map((candidate) => connection.addIceCandidate(candidate).catch(() => undefined)));
   }, []);
 
   const closePeer = useCallback((peerId: string) => {
@@ -172,6 +261,7 @@ export function useLinkcast() {
     if (recoveryTimer) window.clearTimeout(recoveryTimer);
     connectionRecoveryTimersRef.current.delete(peerId);
     peerConnectionsRef.current.delete(peerId);
+    const removedVideoSender = videoSendersRef.current.delete(peerId);
     candidateQueuesRef.current.delete(peerId);
     iceRecoveryRef.current.delete(peerId);
     if (roleRef.current === 'viewer') {
@@ -179,7 +269,8 @@ export function useLinkcast() {
       setRemoteStream(null);
     }
     setViewerCount(peerConnectionsRef.current.size);
-  }, [removeVoice, removePresence]);
+    if (removedVideoSender) void applyVideoBudget();
+  }, [applyVideoBudget, removeVoice, removePresence]);
 
   const scheduleViewerReconnect = useCallback(
     (remotePeerId: string) => {
@@ -322,24 +413,13 @@ export function useLinkcast() {
 
       if (roleRef.current === 'host') {
         for (const track of localStreamRef.current?.getTracks() || []) {
-          if (track.kind === 'video') track.contentHint = 'detail';
+          if (track.kind === 'video') track.contentHint = 'motion';
           const sender = connection.addTransceiver(track, { direction: 'sendonly', streams: [localStreamRef.current!] }).sender;
           if (track.kind === 'video') {
-            const parameters = sender.getParameters();
-            parameters.encodings = parameters.encodings.length ? parameters.encodings : [{}];
-            parameters.degradationPreference = 'maintain-resolution';
-            parameters.encodings[0].maxBitrate = VIDEO_MAX_BITRATE;
-            parameters.encodings[0].maxFramerate = 60;
-            parameters.encodings[0].scaleResolutionDownBy = 1;
-            void sender.setParameters(parameters).catch(async () => {
-              const fallback = sender.getParameters();
-              fallback.encodings = fallback.encodings.length ? fallback.encodings : [{}];
-              fallback.encodings[0].maxBitrate = VIDEO_MAX_BITRATE;
-              fallback.encodings[0].maxFramerate = 60;
-              await sender.setParameters(fallback).catch(() => undefined);
-            });
+            videoSendersRef.current.set(remotePeerId, sender);
           }
         }
+        void applyVideoBudget();
         const transceiver = connection.addTransceiver(voiceTrack.current || 'audio', { direction: 'sendrecv' });
         voiceTransceivers.current.set(remotePeerId, transceiver);
         // Keep the receiver track attached even if a browser fires ontrack
@@ -374,7 +454,7 @@ export function useLinkcast() {
 
       return connection;
     },
-    [addLaserStroke, registerPresence, attachVoice, voiceTrack, broadcastLaserStroke, closePeer, scheduleViewerReconnect, sendSignal],
+    [addLaserStroke, registerPresence, attachVoice, voiceTrack, broadcastLaserStroke, closePeer, scheduleViewerReconnect, sendSignal, applyVideoBudget],
   );
 
   const handleSignal = useCallback(
@@ -489,9 +569,7 @@ export function useLinkcast() {
       const connection = peerConnectionsRef.current.get(signal.senderId);
       if (!connection) {
         if (signal.kind === 'candidate') {
-          const queue = candidateQueuesRef.current.get(signal.senderId) || [];
-          queue.push(payload as RTCIceCandidateInit);
-          candidateQueuesRef.current.set(signal.senderId, queue);
+          queueCandidate(signal.senderId, payload as RTCIceCandidateInit);
         }
         return;
       }
@@ -504,30 +582,17 @@ export function useLinkcast() {
         if (voiceTransceiver) {
           await voiceTransceiver.sender.replaceTrack(voiceTrack.current);
         }
-        // Reapply once encodings have been negotiated; some browsers reject pre-offer parameters.
-        for (const sender of connection.getSenders()) {
-          if (sender.track?.kind !== 'video') continue;
-          const parameters = sender.getParameters();
-          if (!parameters.encodings.length) continue;
-          parameters.degradationPreference = 'maintain-resolution';
-          parameters.encodings[0].maxBitrate = VIDEO_MAX_BITRATE;
-          parameters.encodings[0].maxFramerate = 60;
-          parameters.encodings[0].scaleResolutionDownBy = 1;
-          await sender.setParameters(parameters).catch(() => undefined);
-        }
+        // Reapply once encodings have been negotiated; some browsers reject
+        // parameters set before the first offer/answer exchange.
+        await applyVideoBudget();
       } else if (signal.kind === 'candidate') {
         const candidate = payload as RTCIceCandidateInit;
         if (connection.remoteDescription) await connection.addIceCandidate(candidate).catch(() => undefined);
-        else {
-          const queue = candidateQueuesRef.current.get(signal.senderId) || [];
-          queue.push(candidate);
-          candidateQueuesRef.current.set(signal.senderId, queue);
-        }
+        else queueCandidate(signal.senderId, candidate);
       }
     },
-    [stopVoice, voiceTrack, attachVoice, closePeer, createPeerConnection, flushCandidates, sendSignal],
+    [stopVoice, voiceTrack, attachVoice, closePeer, createPeerConnection, flushCandidates, sendSignal, queueCandidate, applyVideoBudget],
   );
-
   const refreshLease = useCallback(async () => { transportRef.current?.resume(); }, []);
 
   const stopLoops = useCallback(() => {
@@ -540,15 +605,31 @@ export function useLinkcast() {
   const startLoops = useCallback(() => {
     stopLoops();
     const generation = loopGenerationRef.current;
-    const queues = new Map<string, Promise<void>>();
+    const queues = new Map<string, PendingSignalQueue>();
+
     transportRef.current?.subscribe(signal => {
-      const queue = (queues.get(signal.senderId) || Promise.resolve()).then(async () => {
-        if (generation === loopGenerationRef.current) await handleSignal(signal, generation);
-      }).catch(() => setError(SIGNALING_RETRY_ERROR));
+      if (generation !== loopGenerationRef.current) return;
+      const queue = queues.get(signal.senderId) || { pending: [], running: false };
+      if (queue.pending.length >= MAX_SIGNAL_BACKLOG) {
+        // ICE candidates are only useful during the current negotiation. Drop
+        // an old candidate before allowing a fresh control signal through;
+        // this keeps a transient reconnect burst from creating a long queue.
+        const candidateIndex = queue.pending.findIndex(item => item.kind === 'candidate');
+        if (candidateIndex >= 0) queue.pending.splice(candidateIndex, 1);
+        else if (signal.kind === 'candidate') return;
+        else return;
+      }
+      queue.pending.push(signal);
       queues.set(signal.senderId, queue);
-      void queue.then(() => {
-        if (queues.get(signal.senderId) === queue) queues.delete(signal.senderId);
-      });
+      drainSignalQueue(
+        signal.senderId,
+        queue,
+        queues,
+        generation,
+        loopGenerationRef,
+        handleSignal,
+        () => setError(SIGNALING_RETRY_ERROR),
+      );
     });
   }, [handleSignal, stopLoops]);
 
@@ -572,6 +653,7 @@ export function useLinkcast() {
       connection.close();
     });
     peerConnectionsRef.current.clear();
+    videoSendersRef.current.clear();
     candidateQueuesRef.current.clear();
     iceRecoveryRef.current.clear();
     connectionRecoveryTimersRef.current.forEach((timer) => window.clearTimeout(timer));
@@ -600,12 +682,12 @@ export function useLinkcast() {
   }, [api, stopLoops, stopVoice, removeVoice, clearPresence, clearLaserStrokes]);
 
   const createRoom = useCallback(
-    async (stream: MediaStream) => {
+    async (stream: MediaStream, requestedRoomId?: string) => {
       await leave();
       const operation = roomOperationRef.current;
       setStatus('creating');
       setError('');
-      const nextRoomId = randomId().slice(0, 12);
+      const nextRoomId = requestedRoomId || randomId().slice(0, 12);
       const peerId = randomId();
       try {
         localStreamRef.current = stream;

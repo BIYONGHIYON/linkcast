@@ -9,6 +9,7 @@ import {
   Maximize2,
   Minimize2,
   MonitorUp,
+  PictureInPicture,
   Radio,
   RefreshCw,
   Users,
@@ -53,6 +54,60 @@ type WebkitFullscreenVideo = HTMLVideoElement & {
   webkitEnterFullscreen?: () => void;
   webkitExitFullscreen?: () => void;
 };
+
+type PictureInPictureVideo = HTMLVideoElement & {
+  webkitPresentationMode?: string;
+  webkitSetPresentationMode?: (mode: 'inline' | 'picture-in-picture') => void;
+  webkitSupportsPresentationMode?: (mode: string) => boolean;
+};
+
+type PictureInPictureDocument = Document & {
+  pictureInPictureElement?: Element | null;
+  pictureInPictureEnabled?: boolean;
+  exitPictureInPicture?: () => Promise<void>;
+};
+
+function supportsPictureInPicture(video: HTMLVideoElement | null) {
+  if (!video) return false;
+
+  const pictureInPictureVideo = video as PictureInPictureVideo;
+  const pictureInPictureDocument = document as PictureInPictureDocument;
+  const standardSupported =
+    typeof video.requestPictureInPicture === 'function' &&
+    pictureInPictureDocument.pictureInPictureEnabled !== false &&
+    !video.disablePictureInPicture;
+  const webkitSupported =
+    typeof pictureInPictureVideo.webkitSetPresentationMode === 'function' &&
+    pictureInPictureVideo.webkitSupportsPresentationMode?.('picture-in-picture') === true;
+
+  return standardSupported || webkitSupported;
+}
+
+async function writeClipboardText(value: string) {
+  if (!value) throw new Error('empty_clipboard_value');
+
+  try {
+    if (navigator.clipboard?.writeText) {
+      await navigator.clipboard.writeText(value);
+      return;
+    }
+  } catch {
+    // Safari can expose the API before allowing it after an asynchronous step.
+    // Try the synchronous fallback while the original click is still active.
+  }
+
+  const textarea = document.createElement('textarea');
+  textarea.value = value;
+  textarea.setAttribute('readonly', '');
+  textarea.style.position = 'fixed';
+  textarea.style.opacity = '0';
+  document.body.appendChild(textarea);
+  textarea.select();
+  const copyCommand = Reflect.get(document, 'exec' + 'Command') as ((command: string) => boolean) | undefined;
+  const copied = copyCommand ? copyCommand.call(document, 'copy') : false;
+  textarea.remove();
+  if (!copied) throw new Error('clipboard_unavailable');
+}
 
 async function requestFullscreenWithFallback(stage: HTMLElement, _video: HTMLVideoElement | null) {
   if (typeof stage.requestFullscreen === 'function') {
@@ -123,6 +178,9 @@ export default function Home() {
   const [showHostControls, setShowHostControls] = useState(true);
   const [isViewerFullscreen, setIsViewerFullscreen] = useState(false);
   const [showViewerControls, setShowViewerControls] = useState(true);
+  const [viewerPipSupported, setViewerPipSupported] = useState(false);
+  const [isViewerPip, setIsViewerPip] = useState(false);
+  const [viewerPipError, setViewerPipError] = useState('');
 
   const {
     voice,
@@ -147,6 +205,71 @@ export default function Home() {
   useEffect(() => {
     bindOutputElement(mode === 'host' ? previewVideoRef.current : viewerVideoRef.current);
   }, [mode, roomId, remoteStream, bindOutputElement]);
+
+  const exitViewerPictureInPicture = useCallback(async () => {
+    const video = viewerVideoRef.current as PictureInPictureVideo | null;
+    const pictureInPictureDocument = document as PictureInPictureDocument;
+
+    try {
+      if (
+        pictureInPictureDocument.pictureInPictureElement === video &&
+        typeof pictureInPictureDocument.exitPictureInPicture === 'function'
+      ) {
+        await pictureInPictureDocument.exitPictureInPicture();
+      } else if (
+        video?.webkitPresentationMode === 'picture-in-picture' &&
+        typeof video.webkitSetPresentationMode === 'function'
+      ) {
+        video.webkitSetPresentationMode('inline');
+      }
+    } catch {
+      // The browser may have already closed the PiP window.
+    } finally {
+      setIsViewerPip(false);
+    }
+  }, []);
+
+  const toggleViewerPictureInPicture = useCallback(async () => {
+    const video = viewerVideoRef.current as PictureInPictureVideo | null;
+    const pictureInPictureDocument = document as PictureInPictureDocument;
+    if (!video || !remoteStream || !viewerVideoReady) return;
+
+    setViewerPipError('');
+    try {
+      if (pictureInPictureDocument.pictureInPictureElement === video) {
+        await exitViewerPictureInPicture();
+        return;
+      }
+      if (video.webkitPresentationMode === 'picture-in-picture') {
+        await exitViewerPictureInPicture();
+        return;
+      }
+
+      // iOS Safari exposes this WebKit presentation API alongside or before
+      // the standard API. Prefer it for MediaStream-backed video.
+      if (
+        video.webkitSupportsPresentationMode?.('picture-in-picture') === true &&
+        typeof video.webkitSetPresentationMode === 'function'
+      ) {
+        video.webkitSetPresentationMode('picture-in-picture');
+        setIsViewerPip(true);
+        return;
+      }
+
+      if (
+        typeof video.requestPictureInPicture === 'function' &&
+        pictureInPictureDocument.pictureInPictureEnabled !== false
+      ) {
+        await video.requestPictureInPicture();
+        setIsViewerPip(true);
+        return;
+      }
+
+      throw new Error('picture_in_picture_unsupported');
+    } catch {
+      setViewerPipError('이 브라우저에서는 PiP를 시작할 수 없어요. Safari 또는 Chrome 최신 버전을 사용해 주세요.');
+    }
+  }, [exitViewerPictureInPicture, remoteStream, viewerVideoReady]);
 
   const stopPreview = useCallback(() => {
     void leave();
@@ -296,6 +419,7 @@ export default function Home() {
     };
 
     if (!remoteStream) {
+      void exitViewerPictureInPicture();
       video.srcObject = null;
       return;
     }
@@ -325,7 +449,44 @@ export default function Home() {
       video.onplaying = null;
       video.onloadedmetadata = null;
     };
-  }, [remoteStream]);
+  }, [exitViewerPictureInPicture, remoteStream]);
+
+  useEffect(() => {
+    const video = viewerVideoRef.current;
+    if (!video) return;
+
+    const refreshPictureInPictureSupport = () => {
+      setViewerPipSupported(Boolean(remoteStream && viewerVideoReady && supportsPictureInPicture(video)));
+    };
+    refreshPictureInPictureSupport();
+    video.addEventListener('loadedmetadata', refreshPictureInPictureSupport);
+    video.addEventListener('canplay', refreshPictureInPictureSupport);
+    return () => {
+      video.removeEventListener('loadedmetadata', refreshPictureInPictureSupport);
+      video.removeEventListener('canplay', refreshPictureInPictureSupport);
+    };
+  }, [remoteStream, viewerVideoReady]);
+
+  useEffect(() => {
+    const video = viewerVideoRef.current as PictureInPictureVideo | null;
+    if (!video) return;
+
+    const updatePictureInPictureState = () => {
+      const pictureInPictureDocument = document as PictureInPictureDocument;
+      setIsViewerPip(
+        pictureInPictureDocument.pictureInPictureElement === video ||
+        video.webkitPresentationMode === 'picture-in-picture',
+      );
+    };
+    video.addEventListener('enterpictureinpicture', updatePictureInPictureState);
+    video.addEventListener('leavepictureinpicture', updatePictureInPictureState);
+    video.addEventListener('webkitpresentationmodechanged', updatePictureInPictureState);
+    return () => {
+      video.removeEventListener('enterpictureinpicture', updatePictureInPictureState);
+      video.removeEventListener('leavepictureinpicture', updatePictureInPictureState);
+      video.removeEventListener('webkitpresentationmodechanged', updatePictureInPictureState);
+    };
+  }, []);
 
   const updateHostAspectRatio = useCallback(() => {
     const video = previewVideoRef.current;
@@ -334,41 +495,81 @@ export default function Home() {
     }
   }, []);
 
+  const copyText = useCallback(
+    async (value: string, onSuccess: () => void, failureMessage: string) => {
+      try {
+        await writeClipboardText(value);
+        setCaptureError('');
+        onSuccess();
+        return true;
+      } catch {
+        setCaptureError(failureMessage);
+        return false;
+      }
+    },
+    [],
+  );
+
   const createShareLink = useCallback(async () => {
     if (creatingRef.current) return creatingRef.current;
     if (!streamRef.current) return null;
-    const pending = createRoom(streamRef.current).then(createdRoomId => {
-      if (createdRoomId) {
-        autoJoinRef.current = createdRoomId;
-        window.history.replaceState(window.history.state, '', createRoomLink(window.location.href, createdRoomId));
+    const requestedRoomId = crypto.randomUUID().replaceAll('-', '').slice(0, 12);
+    const nextShareUrl = createRoomLink(window.location.href, requestedRoomId);
+    setCopied(false);
+    setCodeCopied(false);
+    // Start the clipboard write in the original button gesture. Waiting for
+    // room creation first loses Safari's transient clipboard permission.
+    const copyPromise = copyText(
+      nextShareUrl,
+      () => {
+        setCopied(true);
+        window.setTimeout(() => setCopied(false), 1800);
+      },
+      '송출 링크를 만들었지만 자동 복사하지 못했어요. 아래 링크 복사 버튼을 눌러 주세요.',
+    );
+    const pending = createRoom(streamRef.current, requestedRoomId).then(async createdRoomId => {
+      await copyPromise;
+      if (!createdRoomId) {
+        setCopied(false);
+        return null;
       }
-      setCopied(false); setCodeCopied(false);
+
+      autoJoinRef.current = createdRoomId;
+      window.history.replaceState(window.history.state, '', nextShareUrl);
       return createdRoomId;
     });
     creatingRef.current = pending;
     try { return await pending; }
     finally { if (creatingRef.current === pending) creatingRef.current = null; }
-  }, [createRoom]);
+  }, [copyText, createRoom]);
 
   const copyLink = async () => {
     if (!shareUrl) return;
-    try {
-      await navigator.clipboard.writeText(shareUrl);
-      setCopied(true);
-      window.setTimeout(() => setCopied(false), 1800);
-    } catch { setCaptureError('링크를 복사하지 못했어요. 표시된 링크를 선택해 복사해 주세요.'); }
+    await copyText(
+      shareUrl,
+      () => {
+        setCopied(true);
+        window.setTimeout(() => setCopied(false), 1800);
+      },
+      '링크를 복사하지 못했어요. 표시된 링크를 선택해 복사해 주세요.',
+    );
   };
 
   const copyCode = async () => {
-    try {
-      await navigator.clipboard.writeText(roomId);
-      setCodeCopied(true);
-      window.setTimeout(() => setCodeCopied(false), 1800);
-    } catch { setCaptureError('코드를 복사하지 못했어요. 표시된 코드를 선택해 복사해 주세요.'); }
+    if (!roomId) return;
+    await copyText(
+      roomId,
+      () => {
+        setCodeCopied(true);
+        window.setTimeout(() => setCodeCopied(false), 1800);
+      },
+      '코드를 복사하지 못했어요. 표시된 코드를 선택해 복사해 주세요.',
+    );
   };
 
   const changeMode = (nextMode: 'host' | 'viewer') => {
     if (nextMode === mode) return;
+    void exitViewerPictureInPicture();
     if (document.fullscreenElement) void document.exitFullscreen();
     if (nativeHostFullscreenRef.current) {
       (previewVideoRef.current as WebkitFullscreenVideo | null)?.webkitExitFullscreen?.();
@@ -725,7 +926,7 @@ export default function Home() {
                 <div className="mt-6 border-t border-border pt-6 lg:mt-auto">
                   {!shareUrl ? (
                     <Button size="lg" disabled={!isPreviewing || status === 'creating'} onClick={() => void createShareLink()} className="h-12 w-full rounded-full text-base">
-                      <Link2 data-icon="inline-start" /> {status === 'creating' ? '방 만드는 중' : '송출 링크 만들기'}
+                      <Link2 data-icon="inline-start" /> {status === 'creating' ? '방 만드는 중' : '링크 만들고 복사'}
                     </Button>
                   ) : (
                     <div className="space-y-3">
@@ -770,14 +971,29 @@ export default function Home() {
                   <div className="absolute inset-x-0 top-0 flex items-center justify-between p-4 sm:p-5">
                     <span className="rounded-full border border-white/10 bg-black/35 px-3 py-1.5 text-xs font-medium text-white/80 backdrop-blur-md">{status === 'connected' ? 'LIVE' : 'CONNECTING'}</span>
                     <div className="flex items-center gap-2">
+                      {remoteStream && viewerPipSupported && (
+                        <Button
+                          variant="ghost"
+                          size="icon"
+                          onClick={() => void toggleViewerPictureInPicture()}
+                          aria-label={isViewerPip ? 'PiP 종료' : 'PiP로 보기'}
+                          aria-pressed={isViewerPip}
+                          className="rounded-full border border-white/10 bg-black/35 text-white/80 hover:bg-black/55 hover:text-white"
+                        >
+                          <PictureInPicture />
+                        </Button>
+                      )}
                       {remoteStream && (
                         <Button variant="ghost" size="icon" onClick={() => void toggleViewerFullscreen()} aria-label={isViewerFullscreen ? '전체화면 종료' : '전체화면 보기'} className="rounded-full border border-white/10 bg-black/35 text-white/80 hover:bg-black/55 hover:text-white">
                           {isViewerFullscreen ? <Minimize2 /> : <Maximize2 />}
                         </Button>
                       )}
-                      <Button variant="ghost" size="sm" onClick={() => { void leave(); setJoinValue(''); window.history.replaceState(null, '', '/'); }} className="rounded-full border border-white/10 bg-black/35 px-3 text-white/80 hover:bg-black/55 hover:text-white"><LogOut /> 나가기</Button>
+                      <Button variant="ghost" size="sm" onClick={() => void (async () => { await exitViewerPictureInPicture(); await leave(); setJoinValue(''); window.history.replaceState(null, '', '/'); })()} className="rounded-full border border-white/10 bg-black/35 px-3 text-white/80 hover:bg-black/55 hover:text-white"><LogOut /> 나가기</Button>
                     </div>
                   </div>
+                )}
+                {viewerPipError && (!isViewerFullscreen || showViewerControls) && (
+                  <p role="alert" className="absolute inset-x-4 bottom-5 rounded-full bg-black/60 px-4 py-2 text-center text-xs text-white/80 backdrop-blur-md">{viewerPipError}</p>
                 )}
                 {playbackBlocked && (!isViewerFullscreen || showViewerControls) && (
                   <div className="absolute inset-x-0 bottom-6 flex justify-center">
