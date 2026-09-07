@@ -9,6 +9,7 @@ import {
   Maximize2,
   Minimize2,
   MonitorUp,
+  PictureInPicture,
   Radio,
   RefreshCw,
   Users,
@@ -54,13 +55,93 @@ type WebkitFullscreenVideo = HTMLVideoElement & {
   webkitExitFullscreen?: () => void;
 };
 
-async function requestFullscreenWithFallback(stage: HTMLElement, _video: HTMLVideoElement | null) {
+type PictureInPictureVideo = HTMLVideoElement & {
+  webkitPresentationMode?: string;
+  webkitSetPresentationMode?: (mode: 'inline' | 'picture-in-picture') => void;
+  webkitSupportsPresentationMode?: (mode: string) => boolean;
+};
+
+type PictureInPictureDocument = Document & {
+  pictureInPictureElement?: Element | null;
+  pictureInPictureEnabled?: boolean;
+  exitPictureInPicture?: () => Promise<void>;
+};
+
+function supportsPictureInPicture(video: HTMLVideoElement | null) {
+  if (!video) return false;
+
+  const pictureInPictureVideo = video as PictureInPictureVideo;
+  const pictureInPictureDocument = document as PictureInPictureDocument;
+  const standardSupported =
+    typeof video.requestPictureInPicture === 'function' &&
+    pictureInPictureDocument.pictureInPictureEnabled !== false &&
+    !video.disablePictureInPicture;
+  const webkitSupported =
+    typeof pictureInPictureVideo.webkitSetPresentationMode === 'function' &&
+    pictureInPictureVideo.webkitSupportsPresentationMode?.('picture-in-picture') === true;
+
+  return standardSupported || webkitSupported;
+}
+
+async function writeClipboardText(value: string) {
+  if (!value) throw new Error('empty_clipboard_value');
+
+  try {
+    if (navigator.clipboard?.writeText) {
+      await navigator.clipboard.writeText(value);
+      return;
+    }
+  } catch {
+    // Safari can expose the API before allowing it after an asynchronous step.
+    // Try the synchronous fallback while the original click is still active.
+  }
+
+  const textarea = document.createElement('textarea');
+  textarea.value = value;
+  textarea.setAttribute('readonly', '');
+  textarea.style.position = 'fixed';
+  textarea.style.opacity = '0';
+  document.body.appendChild(textarea);
+  textarea.select();
+  const copyCommand = Reflect.get(document, 'exec' + 'Command') as ((command: string) => boolean) | undefined;
+  const copied = copyCommand ? copyCommand.call(document, 'copy') : false;
+  textarea.remove();
+  if (!copied) throw new Error('clipboard_unavailable');
+}
+
+async function requestFullscreenWithFallback(stage: HTMLElement, video: HTMLVideoElement | null) {
+  const nativeVideo = video as WebkitFullscreenVideo | null;
+
+  // iPhone Safari does not support element fullscreen for arbitrary containers.
+  // Its native video fullscreen is the only reliable way to hide the address bar.
+  const isAppleMobile = /iPhone|iPad|iPod/.test(navigator.userAgent) ||
+    (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+  if (isAppleMobile && typeof nativeVideo?.webkitEnterFullscreen === 'function') {
+    try {
+      nativeVideo.webkitEnterFullscreen();
+      return 'native-video';
+    } catch {
+      // Continue with the standard fullscreen API or the viewport fallback.
+    }
+  }
+
   if (typeof stage.requestFullscreen === 'function') {
     try {
       await stage.requestFullscreen();
       return 'document';
     } catch {
       // Keep overlays available through a viewport-filling fallback.
+    }
+  }
+
+  // Some mobile browsers reject fullscreen on a nested element but allow the
+  // document root. This also gives the browser a chance to collapse its URL bar.
+  if (typeof document.documentElement.requestFullscreen === 'function') {
+    try {
+      await document.documentElement.requestFullscreen();
+      return 'document';
+    } catch {
+      // The browser may not allow root fullscreen from this browsing context.
     }
   }
 
@@ -96,6 +177,9 @@ export default function Home() {
   const viewerStageRef = useRef<HTMLElement>(null);
   const nativeHostFullscreenRef = useRef(false);
   const nativeViewerFullscreenRef = useRef(false);
+  const viewportHostFullscreenRef = useRef(false);
+  const viewportViewerFullscreenRef = useRef(false);
+  const viewerAutoPipAttemptRef = useRef(false);
   const hostControlsTimerRef = useRef<number | null>(null);
   const viewerControlsTimerRef = useRef<number | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
@@ -123,6 +207,9 @@ export default function Home() {
   const [showHostControls, setShowHostControls] = useState(true);
   const [isViewerFullscreen, setIsViewerFullscreen] = useState(false);
   const [showViewerControls, setShowViewerControls] = useState(true);
+  const [viewerPipSupported, setViewerPipSupported] = useState(false);
+  const [isViewerPip, setIsViewerPip] = useState(false);
+  const [viewerPipError, setViewerPipError] = useState('');
 
   const {
     voice,
@@ -147,6 +234,86 @@ export default function Home() {
   useEffect(() => {
     bindOutputElement(mode === 'host' ? previewVideoRef.current : viewerVideoRef.current);
   }, [mode, roomId, remoteStream, bindOutputElement]);
+
+  const exitViewerPictureInPicture = useCallback(async () => {
+    const video = viewerVideoRef.current as PictureInPictureVideo | null;
+    const pictureInPictureDocument = document as PictureInPictureDocument;
+
+    try {
+      if (
+        pictureInPictureDocument.pictureInPictureElement === video &&
+        typeof pictureInPictureDocument.exitPictureInPicture === 'function'
+      ) {
+        await pictureInPictureDocument.exitPictureInPicture();
+      } else if (
+        video?.webkitPresentationMode === 'picture-in-picture' &&
+        typeof video.webkitSetPresentationMode === 'function'
+      ) {
+        video.webkitSetPresentationMode('inline');
+      }
+    } catch {
+      // The browser may have already closed the PiP window.
+    } finally {
+      setIsViewerPip(false);
+    }
+  }, []);
+
+  const enterViewerPictureInPicture = useCallback(async () => {
+    const video = viewerVideoRef.current as PictureInPictureVideo | null;
+    const pictureInPictureDocument = document as PictureInPictureDocument;
+    if (!video || !remoteStream || !viewerVideoReady) return false;
+
+    if (
+      pictureInPictureDocument.pictureInPictureElement === video ||
+      video.webkitPresentationMode === 'picture-in-picture'
+    ) {
+      setIsViewerPip(true);
+      return true;
+    }
+
+    // iOS Safari's WebKit presentation API can handle a MediaStream video even
+    // where the standard requestPictureInPicture API is unavailable.
+    if (
+      video.webkitSupportsPresentationMode?.('picture-in-picture') === true &&
+      typeof video.webkitSetPresentationMode === 'function'
+    ) {
+      video.webkitSetPresentationMode('picture-in-picture');
+      return true;
+    }
+
+    if (
+      typeof video.requestPictureInPicture === 'function' &&
+      pictureInPictureDocument.pictureInPictureEnabled !== false
+    ) {
+      await video.requestPictureInPicture();
+      setIsViewerPip(true);
+      return true;
+    }
+
+    return false;
+  }, [remoteStream, viewerVideoReady]);
+
+  const toggleViewerPictureInPicture = useCallback(async () => {
+    const video = viewerVideoRef.current as PictureInPictureVideo | null;
+    const pictureInPictureDocument = document as PictureInPictureDocument;
+    if (!video || !remoteStream || !viewerVideoReady) return;
+
+    setViewerPipError('');
+    try {
+      if (pictureInPictureDocument.pictureInPictureElement === video) {
+        await exitViewerPictureInPicture();
+        return;
+      }
+      if (video.webkitPresentationMode === 'picture-in-picture') {
+        await exitViewerPictureInPicture();
+        return;
+      }
+
+      if (!(await enterViewerPictureInPicture())) throw new Error('picture_in_picture_unsupported');
+    } catch {
+      setViewerPipError('이 브라우저에서는 PiP를 시작할 수 없어요. Safari 또는 Chrome 최신 버전을 사용해 주세요.');
+    }
+  }, [enterViewerPictureInPicture, exitViewerPictureInPicture, remoteStream, viewerVideoReady]);
 
   const stopPreview = useCallback(() => {
     void leave();
@@ -296,6 +463,7 @@ export default function Home() {
     };
 
     if (!remoteStream) {
+      void exitViewerPictureInPicture();
       video.srcObject = null;
       return;
     }
@@ -325,7 +493,104 @@ export default function Home() {
       video.onplaying = null;
       video.onloadedmetadata = null;
     };
-  }, [remoteStream]);
+  }, [exitViewerPictureInPicture, remoteStream]);
+
+  useEffect(() => {
+    const video = viewerVideoRef.current;
+    if (!video) return;
+
+    const refreshPictureInPictureSupport = () => {
+      setViewerPipSupported(Boolean(remoteStream && viewerVideoReady && supportsPictureInPicture(video)));
+    };
+    refreshPictureInPictureSupport();
+    video.addEventListener('loadedmetadata', refreshPictureInPictureSupport);
+    video.addEventListener('canplay', refreshPictureInPictureSupport);
+    return () => {
+      video.removeEventListener('loadedmetadata', refreshPictureInPictureSupport);
+      video.removeEventListener('canplay', refreshPictureInPictureSupport);
+    };
+  }, [remoteStream, viewerVideoReady]);
+
+  useEffect(() => {
+    const video = viewerVideoRef.current as PictureInPictureVideo | null;
+    if (!video) return;
+
+    viewerAutoPipAttemptRef.current = false;
+
+    // Let supporting browsers request PiP through their media controls and
+    // automatic-PiP policy instead of relying only on a hidden-page gesture.
+    const pipAction = 'enterpictureinpicture' as MediaSessionAction;
+    let registered = false;
+    if (remoteStream && viewerVideoReady && navigator.mediaSession) {
+      try {
+        navigator.mediaSession.setActionHandler(pipAction, () => {
+          void enterViewerPictureInPicture().catch(() => undefined);
+        });
+        registered = true;
+      } catch { /* Not all mobile browsers expose this action. */ }
+    }
+
+    const requestAutomaticPictureInPicture = (event?: Event) => {
+      if (
+        (document.visibilityState !== 'hidden' && event?.type !== 'pagehide') ||
+        !remoteStream ||
+        !viewerVideoReady ||
+        // Keep the Safari native-video fullscreen path eligible for automatic
+        // PiP. Only the in-page viewport fallback and standard element
+        // fullscreen should block this background transition.
+        viewportViewerFullscreenRef.current ||
+        Boolean(document.fullscreenElement) ||
+        viewerAutoPipAttemptRef.current
+      ) {
+        return;
+      }
+
+      // requestPictureInPicture normally needs a user gesture. This best-effort
+      // attempt is intentionally silent when the browser rejects background PiP.
+      viewerAutoPipAttemptRef.current = true;
+      void enterViewerPictureInPicture().catch(() => undefined);
+    };
+    const resetAutomaticPictureInPictureAttempt = () => {
+      if (document.visibilityState === 'visible') viewerAutoPipAttemptRef.current = false;
+    };
+
+    document.addEventListener('visibilitychange', requestAutomaticPictureInPicture);
+    document.addEventListener('visibilitychange', resetAutomaticPictureInPictureAttempt);
+    window.addEventListener('pagehide', requestAutomaticPictureInPicture);
+    return () => {
+      document.removeEventListener('visibilitychange', requestAutomaticPictureInPicture);
+      document.removeEventListener('visibilitychange', resetAutomaticPictureInPictureAttempt);
+      window.removeEventListener('pagehide', requestAutomaticPictureInPicture);
+      if (registered) navigator.mediaSession.setActionHandler(pipAction, null);
+    };
+  }, [enterViewerPictureInPicture, remoteStream, viewerVideoReady]);
+
+  useEffect(() => {
+    const video = viewerVideoRef.current as PictureInPictureVideo | null;
+    if (!video) return;
+
+    const updatePictureInPictureState = () => {
+      const pictureInPictureDocument = document as PictureInPictureDocument;
+      setIsViewerPip(
+        pictureInPictureDocument.pictureInPictureElement === video ||
+        video.webkitPresentationMode === 'picture-in-picture',
+      );
+      if (video.webkitPresentationMode === 'picture-in-picture') {
+        nativeViewerFullscreenRef.current = false;
+        viewportViewerFullscreenRef.current = false;
+        setIsViewerFullscreen(false);
+        setShowViewerControls(true);
+      }
+    };
+    video.addEventListener('enterpictureinpicture', updatePictureInPictureState);
+    video.addEventListener('leavepictureinpicture', updatePictureInPictureState);
+    video.addEventListener('webkitpresentationmodechanged', updatePictureInPictureState);
+    return () => {
+      video.removeEventListener('enterpictureinpicture', updatePictureInPictureState);
+      video.removeEventListener('leavepictureinpicture', updatePictureInPictureState);
+      video.removeEventListener('webkitpresentationmodechanged', updatePictureInPictureState);
+    };
+  }, [mode, roomId, remoteStream]);
 
   const updateHostAspectRatio = useCallback(() => {
     const video = previewVideoRef.current;
@@ -334,41 +599,81 @@ export default function Home() {
     }
   }, []);
 
+  const copyText = useCallback(
+    async (value: string, onSuccess: () => void, failureMessage: string) => {
+      try {
+        await writeClipboardText(value);
+        setCaptureError('');
+        onSuccess();
+        return true;
+      } catch {
+        setCaptureError(failureMessage);
+        return false;
+      }
+    },
+    [],
+  );
+
   const createShareLink = useCallback(async () => {
     if (creatingRef.current) return creatingRef.current;
     if (!streamRef.current) return null;
-    const pending = createRoom(streamRef.current).then(createdRoomId => {
-      if (createdRoomId) {
-        autoJoinRef.current = createdRoomId;
-        window.history.replaceState(window.history.state, '', createRoomLink(window.location.href, createdRoomId));
+    const requestedRoomId = crypto.randomUUID().replaceAll('-', '').slice(0, 12);
+    const nextShareUrl = createRoomLink(window.location.href, requestedRoomId);
+    setCopied(false);
+    setCodeCopied(false);
+    // Start the clipboard write in the original button gesture. Waiting for
+    // room creation first loses Safari's transient clipboard permission.
+    const copyPromise = copyText(
+      nextShareUrl,
+      () => {
+        setCopied(true);
+        window.setTimeout(() => setCopied(false), 1800);
+      },
+      '송출 링크를 만들었지만 자동 복사하지 못했어요. 아래 링크 복사 버튼을 눌러 주세요.',
+    );
+    const pending = createRoom(streamRef.current, requestedRoomId).then(async createdRoomId => {
+      await copyPromise;
+      if (!createdRoomId) {
+        setCopied(false);
+        return null;
       }
-      setCopied(false); setCodeCopied(false);
+
+      autoJoinRef.current = createdRoomId;
+      window.history.replaceState(window.history.state, '', nextShareUrl);
       return createdRoomId;
     });
     creatingRef.current = pending;
     try { return await pending; }
     finally { if (creatingRef.current === pending) creatingRef.current = null; }
-  }, [createRoom]);
+  }, [copyText, createRoom]);
 
   const copyLink = async () => {
     if (!shareUrl) return;
-    try {
-      await navigator.clipboard.writeText(shareUrl);
-      setCopied(true);
-      window.setTimeout(() => setCopied(false), 1800);
-    } catch { setCaptureError('링크를 복사하지 못했어요. 표시된 링크를 선택해 복사해 주세요.'); }
+    await copyText(
+      shareUrl,
+      () => {
+        setCopied(true);
+        window.setTimeout(() => setCopied(false), 1800);
+      },
+      '링크를 복사하지 못했어요. 표시된 링크를 선택해 복사해 주세요.',
+    );
   };
 
   const copyCode = async () => {
-    try {
-      await navigator.clipboard.writeText(roomId);
-      setCodeCopied(true);
-      window.setTimeout(() => setCodeCopied(false), 1800);
-    } catch { setCaptureError('코드를 복사하지 못했어요. 표시된 코드를 선택해 복사해 주세요.'); }
+    if (!roomId) return;
+    await copyText(
+      roomId,
+      () => {
+        setCodeCopied(true);
+        window.setTimeout(() => setCodeCopied(false), 1800);
+      },
+      '코드를 복사하지 못했어요. 표시된 코드를 선택해 복사해 주세요.',
+    );
   };
 
   const changeMode = (nextMode: 'host' | 'viewer') => {
     if (nextMode === mode) return;
+    void exitViewerPictureInPicture();
     if (document.fullscreenElement) void document.exitFullscreen();
     if (nativeHostFullscreenRef.current) {
       (previewVideoRef.current as WebkitFullscreenVideo | null)?.webkitExitFullscreen?.();
@@ -378,6 +683,8 @@ export default function Home() {
     }
     nativeHostFullscreenRef.current = false;
     nativeViewerFullscreenRef.current = false;
+    viewportHostFullscreenRef.current = false;
+    viewportViewerFullscreenRef.current = false;
     void leave();
     setMode(nextMode);
     setJoinValue('');
@@ -411,6 +718,13 @@ export default function Home() {
     if (!stage) return;
     try {
       const nativeVideo = video as WebkitFullscreenVideo | null;
+      if (viewportHostFullscreenRef.current) {
+        viewportHostFullscreenRef.current = false;
+        nativeHostFullscreenRef.current = false;
+        setIsHostFullscreen(false);
+        setShowHostControls(true);
+        return;
+      }
       if (nativeHostFullscreenRef.current) {
         nativeVideo?.webkitExitFullscreen?.();
         nativeHostFullscreenRef.current = false;
@@ -420,18 +734,28 @@ export default function Home() {
       }
       if (document.fullscreenElement) {
         await document.exitFullscreen();
+        viewportHostFullscreenRef.current = false;
+        nativeHostFullscreenRef.current = false;
+        setIsHostFullscreen(false);
+        setShowHostControls(true);
         return;
       }
       setShowHostControls(false);
       const fullscreenMode = await requestFullscreenWithFallback(stage, video);
-      if (fullscreenMode === 'viewport') {
+      if (fullscreenMode === 'native-video') {
         nativeHostFullscreenRef.current = true;
+        viewportHostFullscreenRef.current = false;
+        setIsHostFullscreen(true);
+      } else if (fullscreenMode === 'viewport') {
+        nativeHostFullscreenRef.current = false;
+        viewportHostFullscreenRef.current = true;
         setIsHostFullscreen(true);
       } else if (!fullscreenMode) {
         throw new Error('fullscreen_unsupported');
       }
     } catch {
       nativeHostFullscreenRef.current = false;
+      viewportHostFullscreenRef.current = false;
       setIsHostFullscreen(false);
       setShowHostControls(true);
     }
@@ -451,6 +775,13 @@ export default function Home() {
     if (!stage) return;
     try {
       const nativeVideo = video as WebkitFullscreenVideo | null;
+      if (viewportViewerFullscreenRef.current) {
+        viewportViewerFullscreenRef.current = false;
+        nativeViewerFullscreenRef.current = false;
+        setIsViewerFullscreen(false);
+        setShowViewerControls(true);
+        return;
+      }
       if (nativeViewerFullscreenRef.current) {
         nativeVideo?.webkitExitFullscreen?.();
         nativeViewerFullscreenRef.current = false;
@@ -460,18 +791,28 @@ export default function Home() {
       }
       if (document.fullscreenElement) {
         await document.exitFullscreen();
+        viewportViewerFullscreenRef.current = false;
+        nativeViewerFullscreenRef.current = false;
+        setIsViewerFullscreen(false);
+        setShowViewerControls(true);
         return;
       }
       setShowViewerControls(false);
       const fullscreenMode = await requestFullscreenWithFallback(stage, video);
-      if (fullscreenMode === 'viewport') {
+      if (fullscreenMode === 'native-video') {
         nativeViewerFullscreenRef.current = true;
+        viewportViewerFullscreenRef.current = false;
+        setIsViewerFullscreen(true);
+      } else if (fullscreenMode === 'viewport') {
+        nativeViewerFullscreenRef.current = false;
+        viewportViewerFullscreenRef.current = true;
         setIsViewerFullscreen(true);
       } else if (!fullscreenMode) {
         throw new Error('fullscreen_unsupported');
       }
     } catch {
       nativeViewerFullscreenRef.current = false;
+      viewportViewerFullscreenRef.current = false;
       setIsViewerFullscreen(false);
       setShowViewerControls(true);
     }
@@ -490,33 +831,57 @@ export default function Home() {
     const viewerVideo = viewerVideoRef.current;
     const handleNativeHostBegin = () => {
       nativeHostFullscreenRef.current = true;
+      viewportHostFullscreenRef.current = false;
       setIsHostFullscreen(true);
       setShowHostControls(false);
     };
     const handleNativeHostEnd = () => {
       nativeHostFullscreenRef.current = false;
+      viewportHostFullscreenRef.current = false;
       setIsHostFullscreen(false);
       setShowHostControls(true);
     };
     const handleNativeViewerBegin = () => {
       nativeViewerFullscreenRef.current = true;
+      viewportViewerFullscreenRef.current = false;
       setIsViewerFullscreen(true);
       setShowViewerControls(false);
     };
     const handleNativeViewerEnd = () => {
       nativeViewerFullscreenRef.current = false;
+      viewportViewerFullscreenRef.current = false;
       setIsViewerFullscreen(false);
       setShowViewerControls(true);
+    };
+    const handleEscapeForViewportFullscreen = (event: KeyboardEvent) => {
+      if (event.key !== 'Escape') return;
+
+      if (viewportHostFullscreenRef.current) {
+        viewportHostFullscreenRef.current = false;
+        nativeHostFullscreenRef.current = false;
+        setIsHostFullscreen(false);
+        setShowHostControls(true);
+      }
+      if (viewportViewerFullscreenRef.current) {
+        viewportViewerFullscreenRef.current = false;
+        nativeViewerFullscreenRef.current = false;
+        setIsViewerFullscreen(false);
+        setShowViewerControls(true);
+      }
     };
     const handleFullscreenChange = () => {
       const hostFullscreen =
         nativeHostFullscreenRef.current ||
-        document.fullscreenElement === hostStageRef.current ||
-        document.fullscreenElement === hostVideo;
+        viewportHostFullscreenRef.current ||
+        (Boolean(document.fullscreenElement) && document.fullscreenElement === hostStageRef.current) ||
+        (Boolean(document.fullscreenElement) && document.fullscreenElement === hostVideo) ||
+        (mode === 'host' && document.fullscreenElement === document.documentElement);
       const viewerFullscreen =
         nativeViewerFullscreenRef.current ||
-        document.fullscreenElement === viewerStageRef.current ||
-        document.fullscreenElement === viewerVideo;
+        viewportViewerFullscreenRef.current ||
+        (Boolean(document.fullscreenElement) && document.fullscreenElement === viewerStageRef.current) ||
+        (Boolean(document.fullscreenElement) && document.fullscreenElement === viewerVideo) ||
+        (mode === 'viewer' && document.fullscreenElement === document.documentElement);
       setIsHostFullscreen(hostFullscreen);
       setIsViewerFullscreen(viewerFullscreen);
       setShowHostControls(!hostFullscreen);
@@ -528,17 +893,19 @@ export default function Home() {
     hostVideo?.addEventListener('webkitendfullscreen', handleNativeHostEnd);
     viewerVideo?.addEventListener('webkitbeginfullscreen', handleNativeViewerBegin);
     viewerVideo?.addEventListener('webkitendfullscreen', handleNativeViewerEnd);
+    window.addEventListener('keydown', handleEscapeForViewportFullscreen);
     document.addEventListener('fullscreenchange', handleFullscreenChange);
     return () => {
       hostVideo?.removeEventListener('webkitbeginfullscreen', handleNativeHostBegin);
       hostVideo?.removeEventListener('webkitendfullscreen', handleNativeHostEnd);
       viewerVideo?.removeEventListener('webkitbeginfullscreen', handleNativeViewerBegin);
       viewerVideo?.removeEventListener('webkitendfullscreen', handleNativeViewerEnd);
+      window.removeEventListener('keydown', handleEscapeForViewportFullscreen);
       document.removeEventListener('fullscreenchange', handleFullscreenChange);
       if (hostControlsTimerRef.current) window.clearTimeout(hostControlsTimerRef.current);
       if (viewerControlsTimerRef.current) window.clearTimeout(viewerControlsTimerRef.current);
     };
-  }, []);
+  }, [mode, roomId, remoteStream]);
 
   useEffect(() => {
     const context = (document as Document & { modelContext?: ModelContextLike })
@@ -653,7 +1020,7 @@ export default function Home() {
 
                 {isPreviewing && <LaserOverlay ratio={hostAspectRatio || 16 / 9} strokes={laserStrokes} onSend={sendLaserStroke} />}
                 {activeRoom && isHostFullscreen && showHostControls && <div className="absolute inset-x-3 bottom-20 z-20 mx-auto max-h-[60dvh] max-w-2xl overflow-y-auto"><VoiceControls voice={voice} host /></div>}
-                {isHostFullscreen && <button type="button" aria-label="영상 메뉴 열기" onClick={revealHostControls} className="absolute bottom-4 right-4 z-10 h-11 w-11 rounded-full bg-black/35 text-xl text-white">···</button>}
+                {isHostFullscreen && <button type="button" aria-label="영상 메뉴 열기" onClick={revealHostControls} className="absolute bottom-2 right-4 z-10 h-11 w-11 rounded-full bg-black/35 text-xl text-white">···</button>}
                 {(!isHostFullscreen || showHostControls) && (
                   <div className="absolute inset-x-0 top-0 flex items-center justify-between p-4 sm:p-5">
                     <span className="rounded-full border border-white/10 bg-black/35 px-3 py-1.5 text-xs font-medium text-white/80 backdrop-blur-md">
@@ -725,7 +1092,7 @@ export default function Home() {
                 <div className="mt-6 border-t border-border pt-6 lg:mt-auto">
                   {!shareUrl ? (
                     <Button size="lg" disabled={!isPreviewing || status === 'creating'} onClick={() => void createShareLink()} className="h-12 w-full rounded-full text-base">
-                      <Link2 data-icon="inline-start" /> {status === 'creating' ? '방 만드는 중' : '송출 링크 만들기'}
+                      <Link2 data-icon="inline-start" /> {status === 'creating' ? '방 만드는 중' : '링크 만들고 복사'}
                     </Button>
                   ) : (
                     <div className="space-y-3">
@@ -765,19 +1132,34 @@ export default function Home() {
                 )}
                 {remoteStream && viewerVideoReady && <LaserOverlay ratio={viewerAspectRatio || 16 / 9} strokes={laserStrokes} onSend={sendLaserStroke} />}
                 {isViewerFullscreen && showViewerControls && <div className="absolute inset-x-3 bottom-20 z-20 mx-auto max-h-[60dvh] max-w-2xl overflow-y-auto"><VoiceControls voice={voice} host={false} /></div>}
-                {isViewerFullscreen && <button type="button" aria-label="영상 메뉴 열기" onClick={revealViewerControls} className="absolute bottom-4 right-4 z-10 h-11 w-11 rounded-full bg-black/35 text-xl text-white">···</button>}
+                {isViewerFullscreen && <button type="button" aria-label="영상 메뉴 열기" onClick={revealViewerControls} className="absolute bottom-2 right-4 z-10 h-11 w-11 rounded-full bg-black/35 text-xl text-white">···</button>}
                 {(!isViewerFullscreen || showViewerControls) && (
                   <div className="absolute inset-x-0 top-0 flex items-center justify-between p-4 sm:p-5">
                     <span className="rounded-full border border-white/10 bg-black/35 px-3 py-1.5 text-xs font-medium text-white/80 backdrop-blur-md">{status === 'connected' ? 'LIVE' : 'CONNECTING'}</span>
                     <div className="flex items-center gap-2">
+                      {remoteStream && viewerPipSupported && (
+                        <Button
+                          variant="ghost"
+                          size="icon"
+                          onClick={() => void toggleViewerPictureInPicture()}
+                          aria-label={isViewerPip ? 'PiP 종료' : 'PiP로 보기'}
+                          aria-pressed={isViewerPip}
+                          className="rounded-full border border-white/10 bg-black/35 text-white/80 hover:bg-black/55 hover:text-white"
+                        >
+                          <PictureInPicture />
+                        </Button>
+                      )}
                       {remoteStream && (
                         <Button variant="ghost" size="icon" onClick={() => void toggleViewerFullscreen()} aria-label={isViewerFullscreen ? '전체화면 종료' : '전체화면 보기'} className="rounded-full border border-white/10 bg-black/35 text-white/80 hover:bg-black/55 hover:text-white">
                           {isViewerFullscreen ? <Minimize2 /> : <Maximize2 />}
                         </Button>
                       )}
-                      <Button variant="ghost" size="sm" onClick={() => { void leave(); setJoinValue(''); window.history.replaceState(null, '', '/'); }} className="rounded-full border border-white/10 bg-black/35 px-3 text-white/80 hover:bg-black/55 hover:text-white"><LogOut /> 나가기</Button>
+                      <Button variant="ghost" size="sm" onClick={() => void (async () => { await exitViewerPictureInPicture(); await leave(); setJoinValue(''); window.history.replaceState(null, '', '/'); })()} className="rounded-full border border-white/10 bg-black/35 px-3 text-white/80 hover:bg-black/55 hover:text-white"><LogOut /> 나가기</Button>
                     </div>
                   </div>
+                )}
+                {viewerPipError && (!isViewerFullscreen || showViewerControls) && (
+                  <p role="alert" className="absolute inset-x-4 bottom-5 rounded-full bg-black/60 px-4 py-2 text-center text-xs text-white/80 backdrop-blur-md">{viewerPipError}</p>
                 )}
                 {playbackBlocked && (!isViewerFullscreen || showViewerControls) && (
                   <div className="absolute inset-x-0 bottom-6 flex justify-center">

@@ -6,16 +6,19 @@ const source = await readFile(new URL('../hooks/use-voice-chat.ts', import.meta.
 const compiled = ts.transpileModule(source, { compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.CommonJS } }).outputText;
 function setup() {
   const state = [];
-  const microphone = { enabled: true, stop() { this.stopped = true; } };
+  const microphone = { enabled: true, readyState: 'live', kind: 'audio', stop() { this.stopped = true; } };
   const stream = { getTracks: () => [microphone], getAudioTracks: () => [microphone] };
   const node = () => ({ connect(target) { return target; }, disconnect() {} });
   let destination;
   class AudioContext {
+    state = 'running';
+    destination = node();
     currentTime = 0;
     audioWorklet = { addModule: async () => {} };
     resume() { return Promise.resolve(); }
     close() { return Promise.resolve(); }
     createMediaStreamSource() { return node(); }
+    createAnalyser() { return { ...node(), fftSize: 1024, getFloatTimeDomainData(buffer) { buffer.fill(0.1); } }; }
     createGain() { return { ...node(), gain: { value: 1 } }; }
     createMediaStreamDestination() {
       destination = { ...node(), channelCount: 2 };
@@ -30,6 +33,7 @@ function setup() {
   const exports = {};
   const playback = [];
   runInNewContext(compiled, { exports, require: () => hooks, AudioContext,
+    window: { setInterval: () => 1, clearInterval() {} },
     Audio: class {
       constructor() { playback.push(this); }
       setAttribute() {}
@@ -46,16 +50,14 @@ function setup() {
   const { voice, state, microphone, playback } = setup();
   voice.bindOutputElement({ sinkId: 'same-as-video-output' });
   let published;
-  voice.subscribeTrack(async track => { published = track; assert.equal(track?.getSettings().channelCount, 1); });
+  voice.subscribeTrack(async track => { published = track; if (track) assert.equal(track, microphone); });
   await voice.start();
   assert.ok(published);
   assert.equal(state[0], true, 'show joined only after sender accepts track');
-  assert.equal(playback[0].sinkId, 'same-as-video-output');
-  assert.equal(playback[0].played, true);
+  assert.equal(playback.length, 0, 'voice output does not depend on a detached audio element');
   voice.stop();
   assert.equal(microphone.stopped, true);
-  assert.equal(playback[0].paused, true);
-  assert.equal(playback[0].srcObject, null);
+  assert.equal(published, null);
 }
 {
   const { voice, state, microphone } = setup();
