@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { SignalingSocket } from './signaling-socket';
+import { useVoiceChat } from './use-voice-chat';
 
 type Role = 'host' | 'viewer';
 export type LaserPoint = { x: number; y: number };
@@ -44,6 +45,15 @@ function randomId() {
 
 
 export function useLinkcast() {
+  const voice = useVoiceChat();
+  const { attach: attachVoice, remove: removeVoice, stop: stopVoice, track: voiceTrack, subscribeTrack } = voice;
+  const voiceTransceivers = useRef(new Map<string, RTCRtpTransceiver>());
+  const voiceMids = useRef(new Map<string, string>());
+  useEffect(() => subscribeTrack(next => {
+    voiceTransceivers.current.forEach(transceiver => {
+      void transceiver.sender.replaceTrack(next).catch(() => undefined);
+    });
+  }), [subscribeTrack]);
   const transportRef = useRef<SignalingSocket | null>(null);
   const [status, setStatus] = useState<ConnectionStatus>('idle');
   const [roomId, setRoomId] = useState('');
@@ -116,6 +126,9 @@ export function useLinkcast() {
   }, []);
 
   const closePeer = useCallback((peerId: string) => {
+    removeVoice(peerId);
+    voiceTransceivers.current.delete(peerId);
+    voiceMids.current.delete(peerId);
     const connection = peerConnectionsRef.current.get(peerId);
     if (connection) {
       connection.onicecandidate = null;
@@ -134,7 +147,7 @@ export function useLinkcast() {
       setRemoteStream(null);
     }
     setViewerCount(peerConnectionsRef.current.size);
-  }, []);
+  }, [removeVoice]);
 
   const scheduleViewerReconnect = useCallback(
     (remotePeerId: string) => {
@@ -255,7 +268,7 @@ export function useLinkcast() {
                 if (!isCurrentConnection()) return;
                 await connection.setLocalDescription(offer);
                 if (!isCurrentConnection()) return;
-                await sendSignal(remotePeerId, 'offer', offer);
+                await sendSignal(remotePeerId, 'offer', { ...offer, voiceMid: voiceTransceivers.current.get(remotePeerId)?.mid });
               } catch {
                 if (!isCurrentConnection()) return;
                 iceRecoveryRef.current.delete(remotePeerId);
@@ -277,7 +290,7 @@ export function useLinkcast() {
       if (roleRef.current === 'host') {
         for (const track of localStreamRef.current?.getTracks() || []) {
           if (track.kind === 'video') track.contentHint = 'detail';
-          const sender = connection.addTrack(track, localStreamRef.current!);
+          const sender = connection.addTransceiver(track, { direction: 'sendonly', streams: [localStreamRef.current!] }).sender;
           if (track.kind === 'video') {
             const parameters = sender.getParameters();
             parameters.encodings = parameters.encodings.length ? parameters.encodings : [{}];
@@ -294,9 +307,16 @@ export function useLinkcast() {
             });
           }
         }
+        const transceiver = connection.addTransceiver(voiceTrack.current || 'audio', { direction: 'sendrecv' });
+        voiceTransceivers.current.set(remotePeerId, transceiver);
+        connection.ontrack = event => attachVoice(remotePeerId, event.track);
         setViewerCount(peerConnectionsRef.current.size);
       } else {
         connection.ontrack = (event) => {
+          if (event.transceiver.mid === voiceMids.current.get(remotePeerId)) {
+            attachVoice(remotePeerId, event.track);
+            return;
+          }
           const stream = remoteStreamRef.current || new MediaStream();
           if (!stream.getTracks().some((track) => track.id === event.track.id)) {
             stream.addTrack(event.track);
@@ -308,7 +328,7 @@ export function useLinkcast() {
 
       return connection;
     },
-    [broadcastLaserStroke, closePeer, scheduleViewerReconnect, sendSignal],
+    [attachVoice, voiceTrack, broadcastLaserStroke, closePeer, scheduleViewerReconnect, sendSignal],
   );
 
   const handleSignal = useCallback(
@@ -357,6 +377,7 @@ export function useLinkcast() {
       }
 
       if (signal.kind === 'room_closed' && roleRef.current === 'viewer') {
+        stopVoice();
         closePeer(signal.senderId);
         transportRef.current?.close();
         setStatus('not-found');
@@ -385,7 +406,7 @@ export function useLinkcast() {
         if (generation !== loopGenerationRef.current) return;
         await connection.setLocalDescription(offer);
         if (generation !== loopGenerationRef.current) return;
-        await sendSignal(signal.senderId, 'offer', offer);
+        await sendSignal(signal.senderId, 'offer', { ...offer, voiceMid: voiceTransceivers.current.get(signal.senderId)?.mid });
         setStatus('connecting');
         return;
       }
@@ -398,7 +419,15 @@ export function useLinkcast() {
         }
         connection = connection || createPeerConnection(signal.senderId);
         if (generation !== loopGenerationRef.current) return;
+        const voiceMid = (payload as RTCSessionDescriptionInit & { voiceMid?: string }).voiceMid;
+        if (typeof voiceMid === 'string') voiceMids.current.set(signal.senderId, voiceMid);
         await connection.setRemoteDescription(payload as RTCSessionDescriptionInit);
+        const voiceTransceiver = connection.getTransceivers().find(t => t.mid === voiceMid);
+        if (voiceTransceiver) {
+          voiceTransceiver.direction = 'sendrecv';
+          voiceTransceivers.current.set(signal.senderId, voiceTransceiver);
+          await voiceTransceiver.sender.replaceTrack(voiceTrack.current);
+        }
         await flushCandidates(signal.senderId, connection);
         if (generation !== loopGenerationRef.current) return;
         const answer = await connection.createAnswer();
@@ -444,7 +473,7 @@ export function useLinkcast() {
         }
       }
     },
-    [closePeer, createPeerConnection, flushCandidates, sendSignal],
+    [stopVoice, voiceTrack, closePeer, createPeerConnection, flushCandidates, sendSignal],
   );
 
   const refreshLease = useCallback(async () => { transportRef.current?.resume(); }, []);
@@ -472,6 +501,10 @@ export function useLinkcast() {
   }, [handleSignal, stopLoops]);
 
   const leave = useCallback(async () => {
+    stopVoice();
+    voiceTransceivers.current.clear();
+    voiceMids.current.clear();
+    peerConnectionsRef.current.forEach((_, id) => removeVoice(id));
     setLaserStroke(null);
     laserChannels.current.forEach(channel => channel.close());
     laserChannels.current.clear();
@@ -510,7 +543,7 @@ export function useLinkcast() {
         keepalive: true,
       }).catch(() => undefined);
     }
-  }, [api, stopLoops]);
+  }, [api, stopLoops, stopVoice, removeVoice]);
 
   const createRoom = useCallback(
     async (stream: MediaStream) => {
@@ -582,7 +615,7 @@ export function useLinkcast() {
   useEffect(() => {
     const connections = peerConnectionsRef.current;
     const handlePageHide = (event: PageTransitionEvent) => {
-      if (!event.persisted) transportRef.current?.close();
+      if (!event.persisted) { stopVoice(); transportRef.current?.close(); }
     };
     const handleVisibilityChange = () => {
       if (document.visibilityState === 'visible') void refreshLease();
@@ -596,9 +629,10 @@ export function useLinkcast() {
       transportRef.current?.close();
       connections.forEach((connection) => connection.close());
     };
-  }, [refreshLease, stopLoops]);
+  }, [refreshLease, stopLoops, stopVoice]);
 
   return {
+    voice,
     laserStroke,
     sendLaserStroke,
     status,

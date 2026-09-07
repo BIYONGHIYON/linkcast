@@ -31,6 +31,7 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { useLinkcast } from '@/hooks/use-linkcast';
 import { LaserOverlay } from '@/components/laser-overlay';
 import { normalizeRoomValue } from '@/lib/room-input';
+import { VoiceControls } from '@/components/voice-controls';
 
 type DeviceOption = { deviceId: string; label: string };
 type CaptureInfo = { width?: number; height?: number; frameRate?: number };
@@ -122,6 +123,7 @@ export default function Home() {
   const [showViewerControls, setShowViewerControls] = useState(true);
 
   const {
+    voice,
     laserStroke,
     sendLaserStroke,
     status,
@@ -627,6 +629,7 @@ export default function Home() {
                 )}
 
                 {isPreviewing && <LaserOverlay ratio={hostAspectRatio || 16 / 9} stroke={laserStroke} onSend={sendLaserStroke} />}
+                {activeRoom && isHostFullscreen && showHostControls && <div className="absolute inset-x-3 bottom-20 z-20 mx-auto max-h-[60dvh] max-w-2xl overflow-y-auto"><VoiceControls voice={voice} host /></div>}
                 {isHostFullscreen && <button type="button" aria-label="영상 메뉴 열기" onClick={revealHostControls} className="absolute bottom-4 right-4 z-10 h-11 w-11 rounded-full bg-black/35 text-xl text-white">···</button>}
                 {(!isHostFullscreen || showHostControls) && (
                   <div className="absolute inset-x-0 top-0 flex items-center justify-between p-4 sm:p-5">
@@ -738,6 +741,7 @@ export default function Home() {
                   </div>
                 )}
                 {remoteStream && viewerVideoReady && <LaserOverlay ratio={viewerAspectRatio || 16 / 9} stroke={laserStroke} onSend={sendLaserStroke} />}
+                {isViewerFullscreen && showViewerControls && <div className="absolute inset-x-3 bottom-20 z-20 mx-auto max-h-[60dvh] max-w-2xl overflow-y-auto"><VoiceControls voice={voice} host={false} /></div>}
                 {isViewerFullscreen && <button type="button" aria-label="영상 메뉴 열기" onClick={revealViewerControls} className="absolute bottom-4 right-4 z-10 h-11 w-11 rounded-full bg-black/35 text-xl text-white">···</button>}
                 {(!isViewerFullscreen || showViewerControls) && (
                   <div className="absolute inset-x-0 top-0 flex items-center justify-between p-4 sm:p-5">
@@ -779,6 +783,11 @@ export default function Home() {
             )}
           </TabsContent>
         </Tabs>
+        {activeRoom && !isHostFullscreen && !isViewerFullscreen && (
+          <div className="mt-4">
+            <VoiceControls voice={voice} host={mode === 'host'} />
+          </div>
+        )}
       </section>
     </main>
   );
