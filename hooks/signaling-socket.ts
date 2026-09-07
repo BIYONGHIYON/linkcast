@@ -1,5 +1,3 @@
-import { getLinkcastOrigin } from '@/lib/room-input';
-
 export type SocketSignal = { id: number; senderId: string; kind: 'join' | 'leave' | 'offer' | 'answer' | 'candidate' | 'host_lost' | 'host_restart' | 'room_closed'; payload: string };
 
 export class SignalingSocket {
@@ -48,7 +46,7 @@ export class SignalingSocket {
   private openSocket(): Promise<{ hostId: string }> {
     const session = this.session!;
     const generation = ++this.generation;
-    const url = new URL('/api/socket', getLinkcastOrigin(window.location.href));
+    const url = new URL('/api/socket', window.location.href);
     url.protocol = url.protocol === 'https:' ? 'wss:' : 'ws:';
     Object.entries(session).forEach(([key, value]) => url.searchParams.set(key, value));
     const ws = new WebSocket(url);

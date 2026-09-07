@@ -1,15 +1,3 @@
-export const LINKCAST_PUBLIC_ORIGIN = 'https://linkcast.byeonghyeon383.workers.dev';
-
-/** Keep local development local, but always share and signal through production. */
-export function getLinkcastOrigin(currentUrl: string): string {
-  const current = new URL(currentUrl);
-  const hostname = current.hostname.toLowerCase();
-  if (hostname === 'localhost' || hostname === '::1' || hostname.startsWith('127.')) {
-    return current.origin;
-  }
-  return LINKCAST_PUBLIC_ORIGIN;
-}
-
 /** Use the same room identifier for pasted links, shared URLs, and plain codes. */
 export function normalizeRoomValue(value: string): string {
   const input = value.trim().replace(/\\&/g, '&').replace(/&amp;/gi, '&');
@@ -30,7 +18,7 @@ export function normalizeRoomValue(value: string): string {
 export function createRoomLink(currentUrl: string, roomId: string): string {
   const room = normalizeRoomValue(roomId);
   if (!room) throw new Error('invalid_room');
-  const url = new URL('/', getLinkcastOrigin(currentUrl));
+  const url = new URL('/', currentUrl);
   url.search = new URLSearchParams({ room, mode: 'viewer' }).toString();
   return url.href;
 }

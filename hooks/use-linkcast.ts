@@ -45,21 +45,6 @@ function randomId() {
   return crypto.randomUUID().replaceAll('-', '');
 }
 
-function findVoiceTransceiver(connection: RTCPeerConnection, expectedMid?: string) {
-  if (expectedMid) {
-    const exact = connection.getTransceivers().find((transceiver) => transceiver.mid === expectedMid);
-    if (exact) return exact;
-  }
-
-  // The host creates the capture-audio transceiver before the dedicated
-  // voice transceiver. If a browser drops the auxiliary voiceMid metadata,
-  // the last audio m-line is still the dedicated voice m-line.
-  const audioTransceivers = connection.getTransceivers().filter((transceiver) =>
-    transceiver.receiver.track.kind === 'audio' || transceiver.sender.track?.kind === 'audio',
-  );
-  return audioTransceivers[audioTransceivers.length - 1] || null;
-}
-
 
 export function useLinkcast() {
   const voice = useVoiceChat();
@@ -68,21 +53,7 @@ export function useLinkcast() {
   const voiceTransceivers = useRef(new Map<string, RTCRtpTransceiver>());
   const voiceMids = useRef(new Map<string, string>());
   useEffect(() => subscribeTrack(async next => {
-    const replacements: Promise<void>[] = [];
-    peerConnectionsRef.current.forEach((connection, peerId) => {
-      if (connection.signalingState === 'closed') return;
-      let transceiver = voiceTransceivers.current.get(peerId);
-      if (!transceiver) {
-        transceiver = findVoiceTransceiver(connection, voiceMids.current.get(peerId)) || undefined;
-        if (transceiver) {
-          transceiver.direction = 'sendrecv';
-          voiceTransceivers.current.set(peerId, transceiver);
-          if (transceiver.mid) voiceMids.current.set(peerId, transceiver.mid);
-        }
-      }
-      if (transceiver) replacements.push(transceiver.sender.replaceTrack(next));
-    });
-    await Promise.all(replacements);
+    await Promise.all([...voiceTransceivers.current.values()].map(transceiver => transceiver.sender.replaceTrack(next)));
   }), [subscribeTrack]);
   const transportRef = useRef<SignalingSocket | null>(null);
   const [status, setStatus] = useState<ConnectionStatus>('idle');
@@ -342,24 +313,11 @@ export function useLinkcast() {
         }
         const transceiver = connection.addTransceiver(voiceTrack.current || 'audio', { direction: 'sendrecv' });
         voiceTransceivers.current.set(remotePeerId, transceiver);
-        // Keep the receiver track attached even if a browser fires ontrack
-        // before or during the answer exchange. The same receiver track is
-        // unmuted when the viewer starts sending voice.
-        attachVoice(remotePeerId, transceiver.receiver.track);
-        connection.ontrack = event => {
-          if (event.track.kind === 'audio') attachVoice(remotePeerId, event.track);
-        };
+        connection.ontrack = event => attachVoice(remotePeerId, event.track);
         setViewerCount(peerConnectionsRef.current.size);
       } else {
         connection.ontrack = (event) => {
-          const voiceTransceiver = voiceTransceivers.current.get(remotePeerId);
-          if (
-            event.track.kind === 'audio' &&
-            (event.transceiver === voiceTransceiver ||
-              event.transceiver.mid === voiceMids.current.get(remotePeerId) ||
-              event.transceiver.currentDirection === 'sendrecv' ||
-              event.transceiver.direction === 'sendrecv')
-          ) {
+          if (event.transceiver.mid === voiceMids.current.get(remotePeerId)) {
             attachVoice(remotePeerId, event.track);
             return;
           }
@@ -468,12 +426,10 @@ export function useLinkcast() {
         const voiceMid = (payload as RTCSessionDescriptionInit & { voiceMid?: string }).voiceMid;
         if (typeof voiceMid === 'string') voiceMids.current.set(signal.senderId, voiceMid);
         await connection.setRemoteDescription(payload as RTCSessionDescriptionInit);
-        const voiceTransceiver = findVoiceTransceiver(connection, voiceMid);
+        const voiceTransceiver = connection.getTransceivers().find(t => t.mid === voiceMid);
         if (voiceTransceiver) {
           voiceTransceiver.direction = 'sendrecv';
           voiceTransceivers.current.set(signal.senderId, voiceTransceiver);
-          if (voiceTransceiver.mid) voiceMids.current.set(signal.senderId, voiceTransceiver.mid);
-          attachVoice(signal.senderId, voiceTransceiver.receiver.track);
           await voiceTransceiver.sender.replaceTrack(voiceTrack.current);
         }
         await flushCandidates(signal.senderId, connection);
@@ -500,10 +456,6 @@ export function useLinkcast() {
         if (generation !== loopGenerationRef.current) return;
         await connection.setRemoteDescription(payload as RTCSessionDescriptionInit);
         await flushCandidates(signal.senderId, connection);
-        const voiceTransceiver = voiceTransceivers.current.get(signal.senderId);
-        if (voiceTransceiver) {
-          await voiceTransceiver.sender.replaceTrack(voiceTrack.current);
-        }
         // Reapply once encodings have been negotiated; some browsers reject pre-offer parameters.
         for (const sender of connection.getSenders()) {
           if (sender.track?.kind !== 'video') continue;
@@ -525,7 +477,7 @@ export function useLinkcast() {
         }
       }
     },
-    [stopVoice, voiceTrack, attachVoice, closePeer, createPeerConnection, flushCandidates, sendSignal],
+    [stopVoice, voiceTrack, closePeer, createPeerConnection, flushCandidates, sendSignal],
   );
 
   const refreshLease = useCallback(async () => { transportRef.current?.resume(); }, []);
@@ -600,12 +552,12 @@ export function useLinkcast() {
   }, [api, stopLoops, stopVoice, removeVoice, clearPresence, clearLaserStrokes]);
 
   const createRoom = useCallback(
-    async (stream: MediaStream, requestedRoomId?: string) => {
+    async (stream: MediaStream) => {
       await leave();
       const operation = roomOperationRef.current;
       setStatus('creating');
       setError('');
-      const nextRoomId = requestedRoomId || randomId().slice(0, 12);
+      const nextRoomId = randomId().slice(0, 12);
       const peerId = randomId();
       try {
         localStreamRef.current = stream;
