@@ -6,11 +6,13 @@ import type { LaserPoint, LaserStroke } from '@/hooks/use-linkcast';
 export function LaserOverlay({ ratio, stroke, onSend }: { ratio: number; stroke: LaserStroke | null; onSend: (points: LaserPoint[]) => void }) {
   const root = useRef<HTMLDivElement>(null);
   const active = useRef<{ pointerId: number; points: LaserPoint[] } | null>(null);
+  const releaseListeners = useRef<(() => void) | null>(null);
   const [draft, setDraft] = useState<LaserPoint[]>([]);
   const [expiredId, setExpiredId] = useState<string | null>(null);
   const fading = useRef<SVGGElement>(null);
   const visible = stroke?.id !== expiredId ? stroke : null;
   const [size, setSize] = useState({ width: 0, height: 0 });
+  useEffect(() => () => { releaseListeners.current?.(); active.current = null; }, []);
   useEffect(() => {
     const element = root.current;
     if (!element) return;
@@ -30,18 +32,24 @@ export function LaserOverlay({ ratio, stroke, onSend }: { ratio: number; stroke:
     const rect = element.getBoundingClientRect();
     return { x: Math.max(0, Math.min(1, (event.clientX - rect.left) / rect.width)), y: Math.max(0, Math.min(1, (event.clientY - rect.top) / rect.height)) };
   };
-  const append = (event: PointerEvent<SVGSVGElement>) => {
+  const appendPoint = (sample: { clientX: number; clientY: number }, element: SVGSVGElement, force = false) => {
+    const current = active.current;
+    if (!current) return;
+    const next = point(sample, element);
+    if (!Number.isFinite(next.x) || !Number.isFinite(next.y)) return;
+    const last = current.points.at(-1)!;
+    if (next.x === last.x && next.y === last.y) return;
+    if (!force && Math.hypot((next.x - last.x) * size.width, (next.y - last.y) * size.height) < 1) return;
+    if (current.points.length >= 512) current.points = current.points.filter((_, i) => i % 2 === 0);
+    current.points.push(next);
+  };
+  const append = (event: PointerEvent<SVGSVGElement>, force = false) => {
     const current = active.current;
     if (!current || current.pointerId !== event.pointerId) return;
     event.preventDefault();
     const coalesced = (event.nativeEvent as unknown as { getCoalescedEvents?: () => Array<{ clientX: number; clientY: number }> }).getCoalescedEvents?.() || [];
     const samples = [...coalesced, event];
-    for (const sample of samples) {
-      if (current.points.length >= 512) current.points = current.points.filter((_, i) => i % 2 === 0);
-      const next = point(sample, event.currentTarget);
-      const last = current.points.at(-1)!;
-      if (Math.hypot((next.x - last.x) * size.width, (next.y - last.y) * size.height) >= 1) current.points.push(next);
-    }
+    for (const sample of samples) appendPoint(sample, event.currentTarget, force);
     setDraft([...current.points]);
   };
   const finish = (pointerId: number) => {
@@ -49,6 +57,8 @@ export function LaserOverlay({ ratio, stroke, onSend }: { ratio: number; stroke:
     if (!current || current.pointerId !== pointerId) return;
     // Capture loss often follows pointerup. Clear first so a stroke is sent only once.
     active.current = null;
+    releaseListeners.current?.();
+    releaseListeners.current = null;
     onSend(current.points.slice());
     setDraft([]);
   };
@@ -56,7 +66,7 @@ export function LaserOverlay({ ratio, stroke, onSend }: { ratio: number; stroke:
     if (!points.length) return null;
     const coordinates = points.map(p => `${p.x * size.width},${p.y * size.height}`);
     // A tiny segment renders a tap with the same cap as a line, without a separate head.
-    if (points.length === 1) coordinates.push(`${points[0].x * size.width + 0.01},${points[0].y * size.height}`);
+    if (points.every(p => p.x === points[0].x && p.y === points[0].y)) coordinates.push(`${points[0].x * size.width + 0.01},${points[0].y * size.height}`);
     return <g fill="none" strokeLinecap="round" strokeLinejoin="round" pointerEvents="none">
       <polyline points={coordinates.join(' ')} stroke="#ed1c2e" strokeWidth="8" />
       <polyline points={coordinates.join(' ')} stroke="#ffffff" strokeWidth="3.5" />
@@ -68,18 +78,39 @@ export function LaserOverlay({ ratio, stroke, onSend }: { ratio: number; stroke:
       onPointerDown={event => {
         if (active.current || (event.pointerType === 'mouse' && event.button !== 0)) return;
         event.preventDefault();
-        try { event.currentTarget.setPointerCapture(event.pointerId); } catch { return; }
+        const element = event.currentTarget;
+        const pointerId = event.pointerId;
         active.current = { pointerId: event.pointerId, points: [point(event, event.currentTarget)] };
         setDraft([...active.current.points]);
+        // Capture may fail or be released before pointerup, especially on quick gestures.
+        // Window listeners keep the release/end point, even outside the video.
+        const release = (native: globalThis.PointerEvent) => {
+          if (native.pointerId !== pointerId || active.current?.pointerId !== pointerId) return;
+          appendPoint(native, element, true);
+          finish(pointerId);
+        };
+        const cancel = (native: globalThis.PointerEvent) => {
+          if (native.pointerId === pointerId) finish(pointerId);
+        };
+        const blur = () => finish(pointerId);
+        window.addEventListener('pointerup', release);
+        window.addEventListener('pointercancel', cancel);
+        window.addEventListener('blur', blur);
+        releaseListeners.current = () => {
+          window.removeEventListener('pointerup', release);
+          window.removeEventListener('pointercancel', cancel);
+          window.removeEventListener('blur', blur);
+        };
+        try { element.setPointerCapture(pointerId); } catch { /* Window release listener remains active. */ }
       }}
       onPointerMove={append}
       onPointerUp={event => {
         if (active.current?.pointerId !== event.pointerId) return;
-        append(event);
+        append(event, true);
         finish(event.pointerId);
       }}
       onPointerCancel={event => finish(event.pointerId)}
-      onLostPointerCapture={event => finish(event.pointerId)}>
+      >
       <rect width="100%" height="100%" fill="transparent" />
       <g key={stroke?.id} ref={fading}>{visible && draw(visible.points)}</g>
       {draw(draft)}
