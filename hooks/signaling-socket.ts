@@ -2,8 +2,6 @@ import { getLinkcastOrigin } from '@/lib/room-input';
 
 export type SocketSignal = { id: number; senderId: string; kind: 'join' | 'leave' | 'offer' | 'answer' | 'candidate' | 'host_lost' | 'host_restart' | 'room_closed'; payload: string };
 
-const MAX_PENDING_SIGNALS = 128;
-
 export class SignalingSocket {
   private socket: WebSocket | null = null;
   private timer: ReturnType<typeof setTimeout> | null = null;
@@ -25,14 +23,7 @@ export class SignalingSocket {
   }
   private emit(signal: SocketSignal) {
     if (this.listener) this.listener(signal);
-    else {
-      if (this.pending.length >= MAX_PENDING_SIGNALS) {
-        const candidateIndex = this.pending.findIndex(item => item.kind === 'candidate');
-        if (candidateIndex < 0) return;
-        this.pending.splice(candidateIndex, 1);
-      }
-      this.pending.push(signal);
-    }
+    else if (this.pending.length < 256) this.pending.push(signal);
   }
   private connect(): Promise<{ hostId: string }> {
     if (this.connecting) return this.connecting;
