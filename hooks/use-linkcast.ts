@@ -3,6 +3,8 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 
 type Role = 'host' | 'viewer';
+export type LaserPoint = { x: number; y: number };
+export type LaserStroke = { id: string; points: LaserPoint[] };
 type ConnectionStatus =
   | 'idle'
   | 'creating'
@@ -63,6 +65,18 @@ export function useLinkcast() {
   const [viewerCount, setViewerCount] = useState(0);
   const [remoteStream, setRemoteStream] = useState<MediaStream | null>(null);
   const [error, setError] = useState('');
+  const [laserStroke, setLaserStroke] = useState<LaserStroke | null>(null);
+  const laserChannels = useRef(new Map<string, RTCDataChannel>());
+  const sendLaserStroke = useCallback((points: LaserPoint[]) => {
+    const stroke = { id: crypto.randomUUID(), points: points.slice(0, 512) };
+    setLaserStroke(stroke);
+    const message = JSON.stringify(stroke);
+    laserChannels.current.forEach(channel => {
+      if (channel.readyState === 'open' && channel.bufferedAmount < 65536) {
+        try { channel.send(message); } catch { /* Connection may close during release. */ }
+      }
+    });
+  }, []);
 
   const roleRef = useRef<Role | null>(null);
   const roomIdRef = useRef('');
@@ -194,6 +208,24 @@ export function useLinkcast() {
 
       const connection = new RTCPeerConnection(rtcConfiguration);
       peerConnectionsRef.current.set(remotePeerId, connection);
+      const channel = connection.createDataChannel('laser', { negotiated: true, id: 0, ordered: false, maxPacketLifeTime: 1500 });
+      laserChannels.current.set(remotePeerId, channel);
+      channel.onclose = () => {
+        if (laserChannels.current.get(remotePeerId) === channel) laserChannels.current.delete(remotePeerId);
+      };
+      channel.onmessage = event => {
+        if (peerConnectionsRef.current.get(remotePeerId) !== connection || typeof event.data !== 'string' || event.data.length > 65536) return;
+        try {
+          const stroke = JSON.parse(event.data) as LaserStroke;
+          if (typeof stroke.id !== 'string' || stroke.id.length > 64 || !Array.isArray(stroke.points) || !stroke.points.length || stroke.points.length > 512 || !stroke.points.every(p => p && Number.isFinite(p.x) && Number.isFinite(p.y) && p.x >= 0 && p.x <= 1 && p.y >= 0 && p.y <= 1)) return;
+          setLaserStroke(stroke);
+          if (roleRef.current === 'host') laserChannels.current.forEach((other, id) => {
+            if (id !== remotePeerId && other.readyState === 'open' && other.bufferedAmount < 65536) {
+              try { other.send(JSON.stringify(stroke)); } catch { /* A viewer disconnected. */ }
+            }
+          });
+        } catch { /* Ignore invalid pointer messages. */ }
+      };
 
       connection.onicecandidate = (event) => {
         if (event.candidate) {
@@ -467,6 +499,9 @@ export function useLinkcast() {
   }, [handleSignal, refreshLease, stopLoops]);
 
   const leave = useCallback(async () => {
+    setLaserStroke(null);
+    laserChannels.current.forEach(channel => channel.close());
+    laserChannels.current.clear();
     stopLoops();
     const currentRoom = roomIdRef.current;
     const currentPeer = peerIdRef.current;
@@ -605,6 +640,8 @@ export function useLinkcast() {
   }, [refreshLease, stopLoops]);
 
   return {
+    laserStroke,
+    sendLaserStroke,
     status,
     roomId,
     viewerCount,

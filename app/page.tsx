@@ -29,6 +29,7 @@ import {
 } from '@/components/ui/select';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { useLinkcast } from '@/hooks/use-linkcast';
+import { LaserOverlay } from '@/components/laser-overlay';
 
 type DeviceOption = { deviceId: string; label: string };
 type CaptureInfo = { width?: number; height?: number; frameRate?: number };
@@ -51,36 +52,18 @@ type WebkitFullscreenVideo = HTMLVideoElement & {
   webkitExitFullscreen?: () => void;
 };
 
-async function requestFullscreenWithFallback(stage: HTMLElement, video: HTMLVideoElement | null) {
+async function requestFullscreenWithFallback(stage: HTMLElement, _video: HTMLVideoElement | null) {
   if (typeof stage.requestFullscreen === 'function') {
     try {
       await stage.requestFullscreen();
       return 'document';
     } catch {
-      // Try the video element below for mobile browsers with partial support.
+      // Keep overlays available through a viewport-filling fallback.
     }
   }
 
-  if (video && typeof video.requestFullscreen === 'function') {
-    try {
-      await video.requestFullscreen();
-      return 'document';
-    } catch {
-      // Try the WebKit video fullscreen API below.
-    }
-  }
-
-  const webkitVideo = video as WebkitFullscreenVideo | null;
-  if (webkitVideo?.webkitEnterFullscreen) {
-    try {
-      webkitVideo.webkitEnterFullscreen();
-      return 'native';
-    } catch {
-      // The browser does not allow native video fullscreen for this stream.
-    }
-  }
-
-  return null;
+  // Video-only fullscreen cannot display interactive overlays. Use the stage instead.
+  return 'viewport';
 }
 
 function normalizeRoomValue(value: string) {
@@ -141,6 +124,8 @@ export default function Home() {
   const [showViewerControls, setShowViewerControls] = useState(true);
 
   const {
+    laserStroke,
+    sendLaserStroke,
     status,
     roomId,
     viewerCount,
@@ -396,7 +381,7 @@ export default function Home() {
       }
       setShowHostControls(false);
       const fullscreenMode = await requestFullscreenWithFallback(stage, video);
-      if (fullscreenMode === 'native') {
+      if (fullscreenMode === 'viewport') {
         nativeHostFullscreenRef.current = true;
         setIsHostFullscreen(true);
       } else if (!fullscreenMode) {
@@ -436,7 +421,7 @@ export default function Home() {
       }
       setShowViewerControls(false);
       const fullscreenMode = await requestFullscreenWithFallback(stage, video);
-      if (fullscreenMode === 'native') {
+      if (fullscreenMode === 'viewport') {
         nativeViewerFullscreenRef.current = true;
         setIsViewerFullscreen(true);
       } else if (!fullscreenMode) {
@@ -606,8 +591,8 @@ export default function Home() {
 
           <TabsContent value="host">
             <div className="grid gap-5 lg:grid-cols-[minmax(0,1fr)_340px]">
-              <section ref={hostStageRef} onPointerDown={revealHostControls} style={!isHostFullscreen && hostAspectRatio ? { aspectRatio: hostAspectRatio } : undefined} className={`group relative overflow-hidden bg-[#0b0d0f] shadow-[0_24px_80px_rgba(8,11,14,0.16)] ${isHostFullscreen ? 'h-dvh w-screen rounded-none' : 'aspect-video min-h-0 rounded-2xl sm:min-h-[280px] sm:rounded-[28px]'}`}>
-                <video ref={previewVideoRef} muted={!hostAudioEnabled} playsInline onLoadedMetadata={updateHostAspectRatio} onDoubleClick={() => void toggleHostFullscreen()} className={`block h-full w-full object-contain transition-opacity duration-300 ${isPreviewing ? 'opacity-100' : 'opacity-0'} ${isPreviewing ? 'cursor-zoom-in' : ''}`}>
+              <section ref={hostStageRef} style={!isHostFullscreen && hostAspectRatio ? { aspectRatio: hostAspectRatio } : undefined} className={`group overflow-hidden bg-[#0b0d0f] shadow-[0_24px_80px_rgba(8,11,14,0.16)] ${isHostFullscreen ? 'fixed inset-0 z-50 h-dvh w-screen rounded-none' : 'relative aspect-video min-h-0 rounded-2xl sm:min-h-[280px] sm:rounded-[28px]'}`}>
+                <video ref={previewVideoRef} muted={!hostAudioEnabled} playsInline onLoadedMetadata={updateHostAspectRatio} className={`block h-full w-full object-contain transition-opacity duration-300 ${isPreviewing ? 'opacity-100' : 'opacity-0'}`}>
                   <track kind="captions" srcLang="ko" label="한국어" src="/captions-empty.vtt" />
                 </video>
 
@@ -624,6 +609,8 @@ export default function Home() {
                   </div>
                 )}
 
+                {isPreviewing && <LaserOverlay ratio={hostAspectRatio || 16 / 9} stroke={laserStroke} onSend={sendLaserStroke} />}
+                {isHostFullscreen && <button type="button" aria-label="영상 메뉴 열기" onClick={revealHostControls} className="absolute bottom-4 right-4 z-10 h-11 w-11 rounded-full bg-black/35 text-xl text-white">···</button>}
                 {(!isHostFullscreen || showHostControls) && (
                   <div className="absolute inset-x-0 top-0 flex items-center justify-between p-4 sm:p-5">
                     <span className="rounded-full border border-white/10 bg-black/35 px-3 py-1.5 text-xs font-medium text-white/80 backdrop-blur-md">
@@ -716,8 +703,8 @@ export default function Home() {
 
           <TabsContent value="viewer">
             {roomId && status !== 'not-found' && status !== 'full' && status !== 'failed' ? (
-              <section ref={viewerStageRef} onPointerDown={revealViewerControls} style={!isViewerFullscreen && viewerAspectRatio ? { aspectRatio: viewerAspectRatio } : undefined} className={`group relative overflow-hidden bg-[#0b0d0f] shadow-[0_24px_80px_rgba(8,11,14,0.16)] ${isViewerFullscreen ? 'h-dvh w-screen rounded-none' : 'aspect-video min-h-0 rounded-2xl sm:min-h-[300px] sm:rounded-[28px]'}`}>
-                <video ref={viewerVideoRef} autoPlay playsInline onDoubleClick={() => void toggleViewerFullscreen()} className={`block h-full w-full object-contain transition-opacity duration-300 ${remoteStream && viewerVideoReady ? 'opacity-100' : 'opacity-0'} ${remoteStream ? 'cursor-zoom-in' : ''}`}>
+              <section ref={viewerStageRef} style={!isViewerFullscreen && viewerAspectRatio ? { aspectRatio: viewerAspectRatio } : undefined} className={`group overflow-hidden bg-[#0b0d0f] shadow-[0_24px_80px_rgba(8,11,14,0.16)] ${isViewerFullscreen ? 'fixed inset-0 z-50 h-dvh w-screen rounded-none' : 'relative aspect-video min-h-0 rounded-2xl sm:min-h-[300px] sm:rounded-[28px]'}`}>
+                <video ref={viewerVideoRef} autoPlay playsInline className={`block h-full w-full object-contain transition-opacity duration-300 ${remoteStream && viewerVideoReady ? 'opacity-100' : 'opacity-0'}`}>
                   <track kind="captions" srcLang="ko" label="한국어" src="/captions-empty.vtt" />
                 </video>
                 {(!remoteStream || !viewerVideoReady) && (
@@ -729,6 +716,8 @@ export default function Home() {
                     </div>
                   </div>
                 )}
+                {remoteStream && viewerVideoReady && <LaserOverlay ratio={viewerAspectRatio || 16 / 9} stroke={laserStroke} onSend={sendLaserStroke} />}
+                {isViewerFullscreen && <button type="button" aria-label="영상 메뉴 열기" onClick={revealViewerControls} className="absolute bottom-4 right-4 z-10 h-11 w-11 rounded-full bg-black/35 text-xl text-white">···</button>}
                 {(!isViewerFullscreen || showViewerControls) && (
                   <div className="absolute inset-x-0 top-0 flex items-center justify-between p-4 sm:p-5">
                     <span className="rounded-full border border-white/10 bg-black/35 px-3 py-1.5 text-xs font-medium text-white/80 backdrop-blur-md">{status === 'connected' ? 'LIVE' : 'CONNECTING'}</span>
