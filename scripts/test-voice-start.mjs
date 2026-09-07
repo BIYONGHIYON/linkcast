@@ -45,12 +45,16 @@ function setup() {
       setSinkId(id) { this.sinkId = id; return Promise.resolve(); }
     },
     AudioWorkletNode: class { parameters = new Map([['threshold', { value: 0 }]]); port = {}; disconnect() {} connect(target) { return target; } },
-    navigator: { mediaDevices: { getUserMedia: async () => stream, enumerateDevices: async () => [] } },
+    navigator: { mediaDevices: { getUserMedia: async constraints => {
+      assert.equal(constraints.audio.autoGainControl, true, 'normalize quiet microphones');
+      return stream;
+    }, enumerateDevices: async () => [] } },
   });
   return { voice: exports.useVoiceChat(), state, microphone, playback };
 }
 {
   const { voice, state, microphone, playback } = setup();
+  assert.equal(voice.volume, 150, 'default call volume is boosted');
   voice.bindOutputElement({ sinkId: 'same-as-video-output' });
   let published;
   voice.subscribeTrack(async track => { published = track; if (track) assert.equal(track, microphone); });

@@ -96,7 +96,7 @@ export function VoiceControls({
               aria-labelledby={`${id}-volume`}
               value={[voice.volume]}
               min={0}
-              max={150}
+              max={450}
               onValueChange={(v) =>
                 voice.setVolume(Array.isArray(v) ? v[0] : v)
               }
@@ -122,7 +122,7 @@ export function VoiceControls({
               }
             />
             <p className="text-xs text-muted-foreground">
-              높을수록 작은 목소리도 전달돼요
+              높을수록 작은 목소리도 말하는 중으로 표시해요
             </p>
             <meter
               aria-label="마이크 입력 크기"

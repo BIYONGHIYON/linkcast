@@ -14,7 +14,7 @@ export function useVoiceChat() {
   const [enabled, setEnabled] = useState(false);
   const [busy, setBusy] = useState(false);
   const [muted, setMuted] = useState(false);
-  const [volume, setVolume] = useState(100);
+  const [volume, setVolume] = useState(150);
   const [sensitivity, setSensitivity] = useState(65);
   const [level, setLevel] = useState(0);
   const [speaking, setSpeaking] = useState(false);
@@ -183,7 +183,9 @@ export function useVoiceChat() {
           deviceId: device ? { exact: device } : undefined,
           echoCancellation: true,
           noiseSuppression: true,
-          autoGainControl: false,
+          // Normalize quiet microphones without replacing the working raw
+          // WebRTC track with a synthesized Web Audio destination track.
+          autoGainControl: true,
           channelCount: 1,
         },
         video: false,
