@@ -109,22 +109,8 @@ async function writeClipboardText(value: string) {
   if (!copied) throw new Error('clipboard_unavailable');
 }
 
-async function requestFullscreenWithFallback(stage: HTMLElement, video: HTMLVideoElement | null) {
-  const nativeVideo = video as WebkitFullscreenVideo | null;
-
-  // iPhone Safari does not support element fullscreen for arbitrary containers.
-  // Its native video fullscreen is the only reliable way to hide the address bar.
-  const isAppleMobile = /iPhone|iPad|iPod/.test(navigator.userAgent) ||
-    (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
-  if (isAppleMobile && typeof nativeVideo?.webkitEnterFullscreen === 'function') {
-    try {
-      nativeVideo.webkitEnterFullscreen();
-      return 'native-video';
-    } catch {
-      // Continue with the standard fullscreen API or the viewport fallback.
-    }
-  }
-
+async function requestFullscreenWithFallback(stage: HTMLElement, _video: HTMLVideoElement | null): Promise<'document' | 'viewport' | 'native-video'> {
+  // Keep the video and pointer overlay together, including on mobile Safari.
   if (typeof stage.requestFullscreen === 'function') {
     try {
       await stage.requestFullscreen();
@@ -639,7 +625,8 @@ export default function Home() {
       }
 
       autoJoinRef.current = createdRoomId;
-      window.history.replaceState(window.history.state, '', nextShareUrl);
+      // The sender stays on the home URL; only the copied link opens a viewer.
+      window.history.replaceState(window.history.state, '', '/');
       return createdRoomId;
     });
     creatingRef.current = pending;
