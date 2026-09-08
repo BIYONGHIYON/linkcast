@@ -104,7 +104,7 @@ export function VoiceControls({
               aria-labelledby={`${id}-volume`}
               value={[voice.volume / 2]}
               min={0}
-              max={300}
+              max={500}
               onValueChange={(v) =>
                 voice.setVolume((Array.isArray(v) ? v[0] : v) * 2)
               }

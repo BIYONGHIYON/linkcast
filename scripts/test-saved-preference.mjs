@@ -36,12 +36,15 @@ assert.equal(saved.value, 480);
 assert.deepEqual(saved.writes, [], 'initial effects must not overwrite saved volume');
 saved.render()[1]();
 assert.deepEqual(saved.writes, ['480']);
-for (const input of ['broken JSON', 'null', '601', '-1', '"200"']) {
+for (const input of ['broken JSON', 'null', '1001', '-1', '"200"']) {
   const invalid = setup(input);
   invalid.render().forEach(effect => effect());
   assert.equal(invalid.value, 200);
 }
 const blocked = setup(null, true);
+const maximum = setup('1000');
+maximum.render().forEach(effect => effect());
+assert.equal(maximum.value, 1000, 'restore maximum actual gain (displayed as 500 percent)');
 blocked.render().forEach(effect => effect());
 blocked.render()[1]();
 assert.equal(blocked.value, 200);

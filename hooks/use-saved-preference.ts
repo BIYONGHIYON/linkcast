@@ -28,5 +28,5 @@ export function useSavedPreference<T extends string | number>(
 }
 
 export const validDevice = (value: unknown): value is string => typeof value === 'string' && value.length <= 1024;
-export const validVolume = (value: unknown): value is number => typeof value === 'number' && Number.isFinite(value) && value >= 0 && value <= 600;
+export const validVolume = (value: unknown): value is number => typeof value === 'number' && Number.isFinite(value) && value >= 0 && value <= 1000;
 export const validSensitivity = (value: unknown): value is number => typeof value === 'number' && Number.isFinite(value) && value >= 0 && value <= 100;
