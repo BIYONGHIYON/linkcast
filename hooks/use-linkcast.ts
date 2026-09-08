@@ -6,6 +6,7 @@ import { useVoiceChat } from './use-voice-chat';
 import { useCallPresence } from './use-call-presence';
 import { useLaserStrokes } from './use-laser-strokes';
 import { useVoiceMesh } from './use-voice-mesh';
+import { configureVideoQuality } from '../lib/video-quality';
 
 type Role = 'host' | 'viewer';
 export type LaserPoint = { x: number; y: number };
@@ -123,46 +124,6 @@ export function useLinkcast() {
   const lastSignalIdRef = useRef(0);
   const loopGenerationRef = useRef(0);
   const peerConnectionsRef = useRef(new Map<string, RTCPeerConnection>());
-  useEffect(() => {
-    let cancelled = false;
-    let busy = false;
-    const lowSamples = new WeakMap<RTCRtpSender, number>();
-    // Local browser statistics only: no signaling/server polling.
-    const timer = window.setInterval(async () => {
-      if (busy) return;
-      busy = true;
-      try {
-        for (const connection of peerConnectionsRef.current.values()) {
-          if (cancelled || connection.connectionState !== 'connected') continue;
-          for (const sender of connection.getSenders()) {
-            if (sender.track?.kind !== 'video') continue;
-            try {
-              const stats = await sender.getStats();
-              if (cancelled || connection.connectionState !== 'connected') continue;
-              let fps: number | undefined;
-              stats.forEach(report => {
-                if (report.type === 'outbound-rtp' && report.kind === 'video') fps = report.framesPerSecond;
-              });
-              const count = typeof fps === 'number' && fps < 24 ? (lowSamples.get(sender) || 0) + 1 : 0;
-              lowSamples.set(sender, count);
-              if (count < 2) continue;
-              const parameters = sender.getParameters();
-              if (parameters.degradationPreference === 'maintain-framerate') continue;
-              // After sustained low FPS, allow resolution reduction instead.
-              // Stay in this mode until renegotiation to avoid quality oscillation.
-              parameters.degradationPreference = 'maintain-framerate';
-              for (const encoding of parameters.encodings) {
-                delete encoding.maxBitrate;
-                encoding.maxFramerate = 60;
-              }
-              await sender.setParameters(parameters);
-            } catch { /* Unsupported stats/parameters or a peer leaving. */ }
-          }
-        }
-      } finally { busy = false; }
-    }, 2000);
-    return () => { cancelled = true; window.clearInterval(timer); };
-  }, []);
   const candidateQueuesRef = useRef(new Map<string, RTCIceCandidateInit[]>());
   const iceRecoveryRef = useRef(new Set<string>());
   const connectionRecoveryTimersRef = useRef(new Map<string, number>());
@@ -365,24 +326,9 @@ export function useLinkcast() {
 
       if (roleRef.current === 'host') {
         for (const track of localStreamRef.current?.getTracks() || []) {
-          if (track.kind === 'video') track.contentHint = 'detail';
+          if (track.kind === 'video') track.contentHint = '';
           const sender = connection.addTransceiver(track, { direction: 'sendonly', streams: [localStreamRef.current!] }).sender;
-          if (track.kind === 'video') {
-            const parameters = sender.getParameters();
-            parameters.encodings = parameters.encodings.length ? parameters.encodings : [{}];
-            parameters.degradationPreference = 'maintain-resolution';
-            // Leave bitrate selection to WebRTC congestion control.
-            for (const encoding of parameters.encodings) delete encoding.maxBitrate;
-            parameters.encodings[0].maxFramerate = 60;
-            parameters.encodings[0].scaleResolutionDownBy = 1;
-            void sender.setParameters(parameters).catch(async () => {
-              const fallback = sender.getParameters();
-              fallback.encodings = fallback.encodings.length ? fallback.encodings : [{}];
-              for (const encoding of fallback.encodings) delete encoding.maxBitrate;
-              fallback.encodings[0].maxFramerate = 60;
-              await sender.setParameters(fallback).catch(() => undefined);
-            });
-          }
+          if (track.kind === 'video') void configureVideoQuality(sender).catch(() => undefined);
         }
         const transceiver = connection.addTransceiver(voiceTrack.current || 'audio', { direction: 'sendrecv' });
         voiceTransceivers.current.set(remotePeerId, transceiver);
@@ -550,13 +496,7 @@ export function useLinkcast() {
         // Reapply once encodings have been negotiated; some browsers reject pre-offer parameters.
         for (const sender of connection.getSenders()) {
           if (sender.track?.kind !== 'video') continue;
-          const parameters = sender.getParameters();
-          if (!parameters.encodings.length) continue;
-          parameters.degradationPreference = 'maintain-resolution';
-          for (const encoding of parameters.encodings) delete encoding.maxBitrate;
-          parameters.encodings[0].maxFramerate = 60;
-          parameters.encodings[0].scaleResolutionDownBy = 1;
-          await sender.setParameters(parameters).catch(() => undefined);
+          await configureVideoQuality(sender).catch(() => undefined);
         }
       } else if (signal.kind === 'candidate') {
         const candidate = payload as RTCIceCandidateInit;
