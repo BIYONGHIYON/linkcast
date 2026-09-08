@@ -1139,21 +1139,6 @@ export default function Home() {
                   <div className="absolute inset-x-0 top-0 flex items-center justify-between gap-2 p-2 sm:p-5">
                     <span className="rounded-full border border-white/10 bg-black/35 px-3 py-1.5 text-xs font-medium text-white/80 backdrop-blur-md">{status === 'connected' ? 'LIVE' : 'CONNECTING'}</span>
                     <div className="flex shrink-0 items-center gap-1.5 sm:gap-2">
-                      {remoteStream && (
-                        <div className="flex h-9 w-24 shrink-0 items-center gap-2 rounded-full border border-white/10 bg-black/35 px-2.5 text-white/80 sm:w-28" title={`영상 소리 ${videoVolume}%`}>
-                          {videoVolume === 0 ? <VolumeX className="size-3.5 shrink-0" aria-hidden="true" /> : <Volume2 className="size-3.5 shrink-0" aria-hidden="true" />}
-                          <Slider aria-label="영상 소리" aria-valuetext={`${videoVolume}%`} className="min-w-0 flex-1" min={0} max={100} value={[videoVolume]}
-                        onValueChange={value => {
-                          const next = Array.isArray(value) ? value[0] : value;
-                          setVideoVolume(next);
-                          const video = viewerVideoRef.current;
-                          if (!video) return;
-                          video.volume = next / 100;
-                          video.muted = next === 0;
-                          void video.play().then(() => setPlaybackBlocked(false)).catch(() => setPlaybackBlocked(next > 0));
-                        }} />
-                        </div>
-                      )}
                       {remoteStream && viewerPipSupported && (
                         <Button
                           variant="ghost"
@@ -1170,6 +1155,21 @@ export default function Home() {
                         <Button variant="ghost" size="icon" onClick={() => void toggleViewerFullscreen()} aria-label={isViewerFullscreen ? '전체화면 종료' : '전체화면 보기'} className="size-9 shrink-0 rounded-full border border-white/10 bg-black/35 text-white/80 hover:bg-black/55 hover:text-white">
                           {isViewerFullscreen ? <Minimize2 /> : <Maximize2 />}
                         </Button>
+                      )}
+                      {remoteStream && (
+                        <div className="flex h-9 w-24 shrink-0 items-center gap-2 rounded-full border border-white/10 bg-black/35 px-2.5 text-white/80 sm:w-28" title={`영상 소리 ${videoVolume}%`}>
+                          {videoVolume === 0 ? <VolumeX className="size-3.5 shrink-0" aria-hidden="true" /> : <Volume2 className="size-3.5 shrink-0" aria-hidden="true" />}
+                          <Slider aria-label="영상 소리" aria-valuetext={`${videoVolume}%`} className="min-w-0 flex-1 [&_[data-slot=slider-track]]:bg-black [&_[data-slot=slider-range]]:bg-white [&_[data-slot=slider-thumb]]:border-white [&_[data-slot=slider-thumb]]:bg-white" min={0} max={100} value={[videoVolume]}
+                        onValueChange={value => {
+                          const next = Array.isArray(value) ? value[0] : value;
+                          setVideoVolume(next);
+                          const video = viewerVideoRef.current;
+                          if (!video) return;
+                          video.volume = next / 100;
+                          video.muted = next === 0;
+                          void video.play().then(() => setPlaybackBlocked(false)).catch(() => setPlaybackBlocked(next > 0));
+                        }} />
+                        </div>
                       )}
                       <Button variant="ghost" size="sm" aria-label="나가기" onClick={() => void (async () => { await exitViewerPictureInPicture(); await leave(); setJoinValue(''); window.history.replaceState(null, '', '/'); })()} className="h-9 shrink-0 rounded-full border border-white/10 bg-black/35 px-2.5 text-white/80 hover:bg-black/55 hover:text-white"><LogOut /><span className="hidden sm:inline">나가기</span></Button>
                     </div>
