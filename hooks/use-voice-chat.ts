@@ -14,7 +14,8 @@ export function useVoiceChat() {
   const [enabled, setEnabled] = useState(false);
   const [busy, setBusy] = useState(false);
   const [muted, setMuted] = useState(false);
-  const [volume, setVolume] = useState(150);
+  // Internal volume is actual gain percent; the UI displays half this value.
+  const [volume, setVolume] = useState(200);
   const [sensitivity, setSensitivity] = useState(65);
   const level = useRef(0);
   const levelListeners = useRef(new Set<() => void>());

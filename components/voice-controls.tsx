@@ -98,15 +98,15 @@ export function VoiceControls({
           <div className="space-y-3">
             <label id={`${id}-volume`} className="flex justify-between text-sm">
               통화 음량{' '}
-              <span className="text-muted-foreground">{voice.volume}%</span>
+              <span className="text-muted-foreground">{voice.volume / 2}%</span>
             </label>
             <Slider
               aria-labelledby={`${id}-volume`}
-              value={[voice.volume]}
+              value={[voice.volume / 2]}
               min={0}
-              max={450}
+              max={300}
               onValueChange={(v) =>
-                voice.setVolume(Array.isArray(v) ? v[0] : v)
+                voice.setVolume((Array.isArray(v) ? v[0] : v) * 2)
               }
             />
           </div>

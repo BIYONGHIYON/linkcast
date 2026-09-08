@@ -22,7 +22,7 @@ function setup() {
       assert.equal(player.srcObject, undefined, 'reroute before remote playback starts');
       player.routedThroughWebAudio = true;
       return { ...node(), connect(gain) {
-        assert.equal(gain.gain.value, 1.5, 'single path applies full 150 percent gain');
+        assert.equal(gain.gain.value, 2, 'single path applies actual 200 percent gain');
         return gain;
       } };
     }
@@ -62,7 +62,7 @@ function setup() {
 }
 {
   const { voice, state, microphone, playback } = setup();
-  assert.equal(voice.volume, 150, 'default call volume is boosted');
+  assert.equal(voice.volume, 200, 'default actual volume is 200 percent (displayed as 100)');
   voice.bindOutputElement({ sinkId: 'same-as-video-output' });
   let published;
   voice.subscribeTrack(async track => { published = track; if (track) assert.equal(track, microphone); });
