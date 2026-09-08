@@ -30,7 +30,8 @@ import {
 } from '@/components/ui/select';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { useLinkcast } from '@/hooks/use-linkcast';
-import { useSavedPreference, validDevice } from '@/hooks/use-saved-preference';
+import { Slider } from '@/components/ui/slider';
+import { useSavedPreference, validDevice, validSensitivity } from '@/hooks/use-saved-preference';
 import { LaserOverlay } from '@/components/laser-overlay';
 import { createRoomLink, normalizeRoomValue } from '@/lib/room-input';
 import { VoiceControls } from '@/components/voice-controls';
@@ -189,6 +190,16 @@ export default function Home() {
   const [captureError, setCaptureError] = useState('');
   const [hostAudioEnabled, setHostAudioEnabled] = useState(true);
   const [playbackBlocked, setPlaybackBlocked] = useState(false);
+  const [videoVolume, setVideoVolume] = useState(100);
+  const videoVolumeRef = useRef(videoVolume);
+  useSavedPreference('linkcast.viewer.volume.v1', videoVolume, setVideoVolume, validSensitivity);
+  useEffect(() => {
+    videoVolumeRef.current = videoVolume;
+    const video = viewerVideoRef.current;
+    if (!video) return;
+    video.volume = videoVolume / 100;
+    if (videoVolume === 0) video.muted = true;
+  }, [videoVolume]);
   const [viewerVideoReady, setViewerVideoReady] = useState(false);
   const [hostAspectRatio, setHostAspectRatio] = useState<number | null>(null);
   const [viewerAspectRatio, setViewerAspectRatio] = useState<number | null>(null);
@@ -448,7 +459,7 @@ export default function Home() {
     setViewerAspectRatio(null);
     video.onplaying = () => {
       setViewerVideoReady(true);
-      setPlaybackBlocked(video.muted);
+      setPlaybackBlocked(video.muted && videoVolumeRef.current > 0);
     };
 
     if (!remoteStream) {
@@ -468,7 +479,8 @@ export default function Home() {
       });
     };
 
-    video.muted = false;
+    video.volume = videoVolumeRef.current / 100;
+    video.muted = videoVolumeRef.current === 0;
     video.srcObject = remoteStream;
     video.onloadedmetadata = () => {
       if (video.videoWidth && video.videoHeight) {
@@ -1148,15 +1160,33 @@ export default function Home() {
                     </div>
                   </div>
                 )}
+                {remoteStream && (!isViewerFullscreen || showViewerControls) && (
+                  <div className="absolute bottom-3 left-3 z-20 flex w-[min(260px,calc(100%_-_80px))] items-center gap-3 rounded-xl bg-black/70 px-3 py-3 text-white">
+                    <Volume2 className="size-4 shrink-0" aria-hidden="true" />
+                    <div className="min-w-0 flex-1 space-y-2">
+                      <label id="viewer-video-volume" className="flex justify-between text-xs"><span>영상 소리</span><span>{videoVolume}%</span></label>
+                      <Slider aria-labelledby="viewer-video-volume" min={0} max={100} value={[videoVolume]}
+                        onValueChange={value => {
+                          const next = Array.isArray(value) ? value[0] : value;
+                          setVideoVolume(next);
+                          const video = viewerVideoRef.current;
+                          if (!video) return;
+                          video.volume = next / 100;
+                          video.muted = next === 0;
+                          void video.play().then(() => setPlaybackBlocked(false)).catch(() => setPlaybackBlocked(next > 0));
+                        }} />
+                    </div>
+                  </div>
+                )}
                 {viewerPipError && (!isViewerFullscreen || showViewerControls) && (
                   <p role="alert" className="absolute inset-x-4 bottom-5 rounded-full bg-black/60 px-4 py-2 text-center text-xs text-white/80 backdrop-blur-md">{viewerPipError}</p>
                 )}
                 {playbackBlocked && (!isViewerFullscreen || showViewerControls) && (
-                  <div className="absolute inset-x-0 bottom-6 flex justify-center">
+                  <div className="absolute inset-x-0 bottom-24 flex justify-center">
                     <Button onClick={() => {
                       const video = viewerVideoRef.current;
                       if (!video) return;
-                      video.muted = false;
+                      video.muted = videoVolumeRef.current === 0;
                       void video.play().then(() => setPlaybackBlocked(false)).catch(() => setPlaybackBlocked(true));
                     }} className="h-11 rounded-full bg-white px-5 text-[#0b0d0f] hover:bg-white/90"><Volume2 /> 소리와 함께 재생</Button>
                   </div>
