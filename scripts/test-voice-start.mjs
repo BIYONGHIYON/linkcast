@@ -40,7 +40,7 @@ function setup() {
   } };
   const exports = {};
   const playback = [];
-  runInNewContext(compiled, { exports, require: () => hooks, AudioContext,
+  runInNewContext(compiled, { exports, require: id => id === 'react' ? hooks : { useSavedPreference() {} }, AudioContext,
     MediaStream: class { constructor(tracks) { this.tracks = tracks; } },
     document: { body: { appendChild(element) { element.connected = true; } } },
     window: { setInterval: () => 1, clearInterval() {} },

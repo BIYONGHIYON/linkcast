@@ -1,6 +1,7 @@
 'use client';
 
 import { useCallback, useEffect, useRef, useState } from 'react';
+import { useSavedPreference, validDevice, validVolume, validSensitivity } from './use-saved-preference';
 
 type SinkableAudioContext = AudioContext & {
   setSinkId?: (sinkId: string) => Promise<void>;
@@ -36,6 +37,9 @@ export function useVoiceChat() {
   const inputGraph = useRef<AudioNode[]>([]);
   const [devices, setDevices] = useState<MediaDeviceInfo[]>([]);
   const [device, setDevice] = useState('');
+  useSavedPreference('linkcast.call.volume.v1', volume, setVolume, validVolume);
+  useSavedPreference('linkcast.call.sensitivity.v1', sensitivity, setSensitivity, validSensitivity);
+  useSavedPreference('linkcast.call.device.v1', device, setDevice, validDevice);
   const track = useRef<MediaStreamTrack | null>(null);
   const onTrack = useRef<((track: MediaStreamTrack | null) => void | Promise<void>) | null>(
     null,

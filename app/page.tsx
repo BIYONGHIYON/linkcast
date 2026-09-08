@@ -30,6 +30,7 @@ import {
 } from '@/components/ui/select';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { useLinkcast } from '@/hooks/use-linkcast';
+import { useSavedPreference, validDevice } from '@/hooks/use-saved-preference';
 import { LaserOverlay } from '@/components/laser-overlay';
 import { createRoomLink, normalizeRoomValue } from '@/lib/room-input';
 import { VoiceControls } from '@/components/voice-controls';
@@ -178,6 +179,8 @@ export default function Home() {
   const [audioDevices, setAudioDevices] = useState<DeviceOption[]>([]);
   const [selectedDevice, setSelectedDevice] = useState('');
   const [selectedAudio, setSelectedAudio] = useState('');
+  useSavedPreference('linkcast.capture.video.v1', selectedDevice, setSelectedDevice, validDevice);
+  useSavedPreference('linkcast.capture.audio.v1', selectedAudio, setSelectedAudio, validDevice);
   const [captureInfo, setCaptureInfo] = useState<CaptureInfo>({});
   const [isPreviewing, setIsPreviewing] = useState(false);
   const [joinValue, setJoinValue] = useState('');
