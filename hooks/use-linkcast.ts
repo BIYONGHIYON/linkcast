@@ -39,7 +39,6 @@ const rtcConfiguration: RTCConfiguration = {
 };
 
 const SIGNALING_RETRY_ERROR = '연결 서버에 닿지 못했어요. 다시 연결하고 있습니다.';
-const VIDEO_MAX_BITRATE = 12_000_000;
 const MAX_VIEWERS = 5;
 
 function randomId() {
@@ -124,6 +123,46 @@ export function useLinkcast() {
   const lastSignalIdRef = useRef(0);
   const loopGenerationRef = useRef(0);
   const peerConnectionsRef = useRef(new Map<string, RTCPeerConnection>());
+  useEffect(() => {
+    let cancelled = false;
+    let busy = false;
+    const lowSamples = new WeakMap<RTCRtpSender, number>();
+    // Local browser statistics only: no signaling/server polling.
+    const timer = window.setInterval(async () => {
+      if (busy) return;
+      busy = true;
+      try {
+        for (const connection of peerConnectionsRef.current.values()) {
+          if (cancelled || connection.connectionState !== 'connected') continue;
+          for (const sender of connection.getSenders()) {
+            if (sender.track?.kind !== 'video') continue;
+            try {
+              const stats = await sender.getStats();
+              if (cancelled || connection.connectionState !== 'connected') continue;
+              let fps: number | undefined;
+              stats.forEach(report => {
+                if (report.type === 'outbound-rtp' && report.kind === 'video') fps = report.framesPerSecond;
+              });
+              const count = typeof fps === 'number' && fps < 24 ? (lowSamples.get(sender) || 0) + 1 : 0;
+              lowSamples.set(sender, count);
+              if (count < 2) continue;
+              const parameters = sender.getParameters();
+              if (parameters.degradationPreference === 'maintain-framerate') continue;
+              // After sustained low FPS, allow resolution reduction instead.
+              // Stay in this mode until renegotiation to avoid quality oscillation.
+              parameters.degradationPreference = 'maintain-framerate';
+              for (const encoding of parameters.encodings) {
+                delete encoding.maxBitrate;
+                encoding.maxFramerate = 60;
+              }
+              await sender.setParameters(parameters);
+            } catch { /* Unsupported stats/parameters or a peer leaving. */ }
+          }
+        }
+      } finally { busy = false; }
+    }, 2000);
+    return () => { cancelled = true; window.clearInterval(timer); };
+  }, []);
   const candidateQueuesRef = useRef(new Map<string, RTCIceCandidateInit[]>());
   const iceRecoveryRef = useRef(new Set<string>());
   const connectionRecoveryTimersRef = useRef(new Map<string, number>());
@@ -332,13 +371,14 @@ export function useLinkcast() {
             const parameters = sender.getParameters();
             parameters.encodings = parameters.encodings.length ? parameters.encodings : [{}];
             parameters.degradationPreference = 'maintain-resolution';
-            parameters.encodings[0].maxBitrate = VIDEO_MAX_BITRATE;
+            // Leave bitrate selection to WebRTC congestion control.
+            for (const encoding of parameters.encodings) delete encoding.maxBitrate;
             parameters.encodings[0].maxFramerate = 60;
             parameters.encodings[0].scaleResolutionDownBy = 1;
             void sender.setParameters(parameters).catch(async () => {
               const fallback = sender.getParameters();
               fallback.encodings = fallback.encodings.length ? fallback.encodings : [{}];
-              fallback.encodings[0].maxBitrate = VIDEO_MAX_BITRATE;
+              for (const encoding of fallback.encodings) delete encoding.maxBitrate;
               fallback.encodings[0].maxFramerate = 60;
               await sender.setParameters(fallback).catch(() => undefined);
             });
@@ -513,7 +553,7 @@ export function useLinkcast() {
           const parameters = sender.getParameters();
           if (!parameters.encodings.length) continue;
           parameters.degradationPreference = 'maintain-resolution';
-          parameters.encodings[0].maxBitrate = VIDEO_MAX_BITRATE;
+          for (const encoding of parameters.encodings) delete encoding.maxBitrate;
           parameters.encodings[0].maxFramerate = 60;
           parameters.encodings[0].scaleResolutionDownBy = 1;
           await sender.setParameters(parameters).catch(() => undefined);

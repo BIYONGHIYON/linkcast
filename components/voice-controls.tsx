@@ -1,4 +1,5 @@
 'use client';
+import { useSyncExternalStore } from 'react';
 import { Mic, MicOff, Phone, PhoneOff, SlidersHorizontal } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Slider } from '@/components/ui/slider';
@@ -11,6 +12,13 @@ import {
 } from '@/components/ui/select';
 import type { useVoiceChat } from '@/hooks/use-voice-chat';
 import type { CallParticipant } from '@/hooks/use-call-presence';
+
+const emptyLevel = () => 0;
+function VoiceMeter({ voice }: { voice: ReturnType<typeof useVoiceChat> }) {
+  const level = useSyncExternalStore(voice.subscribeLevel, voice.getLevel, emptyLevel);
+  return <meter aria-label="마이크 입력 크기" min={0} max={100}
+    value={voice.muted ? 0 : level} className="h-2 w-full" />;
+}
 
 export function VoiceControls({
   voice,
@@ -124,13 +132,7 @@ export function VoiceControls({
             <p className="text-xs text-muted-foreground">
               높을수록 작은 목소리도 말하는 중으로 표시해요
             </p>
-            <meter
-              aria-label="마이크 입력 크기"
-              min={0}
-              max={100}
-              value={voice.muted ? 0 : voice.level}
-              className="h-2 w-full"
-            />
+            <VoiceMeter voice={voice} />
           </div>
           <div className="space-y-2">
             <p id={`${id}-device`} className="text-sm">

@@ -66,7 +66,11 @@ function setup() {
   voice.bindOutputElement({ sinkId: 'same-as-video-output' });
   let published;
   voice.subscribeTrack(async track => { published = track; if (track) assert.equal(track, microphone); });
+  let meterUpdates = 0;
+  const unsubscribeMeter = voice.subscribeLevel(() => meterUpdates++);
   await voice.start();
+  assert.ok(voice.getLevel() > 0);
+  assert.equal(meterUpdates, 1, 'level updates notify the isolated meter');
   assert.ok(published);
   assert.equal(state[0], true, 'show joined only after sender accepts track');
   assert.equal(playback.length, 0, 'voice output does not depend on a detached audio element');
@@ -88,14 +92,17 @@ function setup() {
   voice.attach('peer', incoming);
   playback[1].play = () => Promise.reject(new Error('NotAllowedError'));
   await voice.resumePlayback();
-  assert.equal(state[8], true, 'autoplay rejection exposes the playback unlock control');
+  assert.equal(state[7], true, 'autoplay rejection exposes the playback unlock control');
   playback[1].play = () => Promise.resolve();
   await voice.resumePlayback();
-  assert.equal(state[8], false, 'explicit playback retry clears blocked state');
+  assert.equal(state[7], false, 'explicit playback retry clears blocked state');
   voice.stop();
   assert.equal(playback[1].srcObject, null);
   assert.equal(microphone.stopped, true);
   assert.equal(published, null);
+  assert.equal(voice.getLevel(), 0);
+  assert.equal(meterUpdates, 2, 'stop resets the meter');
+  unsubscribeMeter();
 }
 {
   const { voice, state, microphone } = setup();

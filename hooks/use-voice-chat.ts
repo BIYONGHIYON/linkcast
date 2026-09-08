@@ -16,7 +16,18 @@ export function useVoiceChat() {
   const [muted, setMuted] = useState(false);
   const [volume, setVolume] = useState(150);
   const [sensitivity, setSensitivity] = useState(65);
-  const [level, setLevel] = useState(0);
+  const level = useRef(0);
+  const levelListeners = useRef(new Set<() => void>());
+  const getLevel = useCallback(() => level.current, []);
+  const subscribeLevel = useCallback((listener: () => void) => {
+    levelListeners.current.add(listener);
+    return () => { levelListeners.current.delete(listener); };
+  }, []);
+  const setLevel = useCallback((next: number) => {
+    if (level.current === next) return;
+    level.current = next;
+    levelListeners.current.forEach(listener => listener());
+  }, []);
   const [speaking, setSpeaking] = useState(false);
   const [error, setError] = useState('');
   const [playbackBlocked, setPlaybackBlocked] = useState(false);
@@ -157,7 +168,7 @@ export function useVoiceChat() {
     setLevel(0);
     setSpeaking(false);
     setPlaybackBlocked(false);
-  }, []);
+  }, [setLevel]);
 
   const start = useCallback(async () => {
     if (context.current && context.current.state !== 'closed') return;
@@ -265,7 +276,7 @@ export function useVoiceChat() {
     } finally {
       if (token === generation.current) setBusy(false);
     }
-  }, [attach, device, resumePlayback, stop]);
+  }, [attach, device, resumePlayback, stop, setLevel]);
 
   const toggleMute = useCallback(() => {
     setMuted((current) => {
@@ -308,7 +319,8 @@ export function useVoiceChat() {
     setVolume,
     sensitivity,
     setSensitivity,
-    level,
+    getLevel,
+    subscribeLevel,
     speaking: speaking && !muted,
     error,
     devices,
