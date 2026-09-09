@@ -7,7 +7,10 @@ const source = await readFile(new URL('../hooks/use-voice-mesh.ts', import.meta.
 const compiled = ts.transpileModule(source, { compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.CommonJS } }).outputText;
 const listeners = new Map();
 const connections = [];
-function client(selfId) {
+const A_ID = 'aaaaaaaaaaaaaaaa';
+const B_ID = 'bbbbbbbbbbbbbbbb';
+const C_ID = 'cccccccccccccccc';
+function client(selfId, visiblePeerIds) {
   const effects = [];
   const exports = {};
   class Peer {
@@ -17,6 +20,7 @@ function client(selfId) {
     constructor() { connections.push(this); }
     addTransceiver(track, options) {
       assert.equal(options.direction, 'sendrecv');
+      this.initialTrack = track;
       this.sender = { track, replaceTrack: async next => { this.sender.track = next; } };
       return { sender: this.sender };
     }
@@ -33,7 +37,7 @@ function client(selfId) {
   const received = [];
   const microphone = { kind: 'audio', id: selfId };
   const replace = exports.useVoiceMesh({ selfId, hostId: 'host',
-    participants: [{ id: 'host' }, { id: selfId === 'a' ? 'b' : 'a' }],
+    participants: [{ id: 'host' }, ...visiblePeerIds.map(id => ({ id }))],
     track: { current: microphone }, attach: (id, track) => received.push({ id, track }), remove() {},
     send: (id, message) => queueMicrotask(() => listeners.get(id)?.(selfId, message)),
     subscribe: listener => { listeners.set(selfId, listener); return () => listeners.delete(selfId); },
@@ -41,20 +45,24 @@ function client(selfId) {
   const cleanup = effects.map(fn => fn());
   return { replace, received, microphone, cleanup: () => cleanup.forEach(fn => fn?.()) };
 }
-const a = client('a');
-const b = client('b');
+const a = client(A_ID, [B_ID, C_ID]);
+// Model the real race: B and C receive relayed offers before React has committed
+// roster entries for the senders. Every viewer pair must still establish audio.
+const b = client(B_ID, [C_ID]);
+const c = client(C_ID, []);
 await new Promise(resolve => setTimeout(resolve, 20));
-assert.equal(connections.length, 2, 'one audio peer at each viewer, no duplicate offers');
+assert.equal(connections.length, 6, 'three viewer pairs create one audio peer at each end');
 assert.ok(connections.every(pc => pc.remoteDescription && pc.signalingState === 'stable'));
-assert.equal(connections[0].sender.track, a.microphone);
-assert.equal(connections[1].sender.track, b.microphone);
+assert.equal(connections.filter(pc => pc.initialTrack === a.microphone).length, 2);
+assert.equal(connections.filter(pc => pc.initialTrack === b.microphone).length, 2);
+assert.equal(connections.filter(pc => pc.initialTrack === c.microphone).length, 2);
 connections[0].ontrack({ track: b.microphone });
-assert.equal(a.received[0].id, 'mesh:b');
+assert.equal(a.received[0].id, `mesh:${B_ID}`);
 await a.replace(null);
-assert.equal(connections[0].sender.track, null);
+assert.ok(connections.filter(pc => pc.initialTrack === a.microphone).every(pc => pc.sender.track === null));
 await a.replace(a.microphone);
-assert.equal(connections[0].sender.track, a.microphone);
-a.cleanup(); b.cleanup();
+assert.ok(connections.filter(pc => pc.initialTrack === a.microphone).every(pc => pc.sender.track === a.microphone));
+a.cleanup(); b.cleanup(); c.cleanup();
 assert.ok(connections.every(pc => pc.closed));
 assert.equal(listeners.size, 0);
-console.log('PASS: viewer audio negotiation, remote playback attachment, microphone replacement, room cleanup');
+console.log('PASS: every viewer pair survives roster races, attaches playback, replaces microphones, and cleans up');

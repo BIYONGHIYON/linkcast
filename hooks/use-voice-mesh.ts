@@ -18,7 +18,6 @@ type Options = {
 /** Audio-only viewer mesh. Existing host connections still carry host voice/video. */
 export function useVoiceMesh({ selfId, hostId, participants, track, attach, remove, send, subscribe }: Options) {
   const peers = useRef(new Map<string, Entry>());
-  const allowed = useRef(new Set<string>());
   const close = useCallback((id: string) => {
     const entry = peers.current.get(id);
     peers.current.delete(id);
@@ -63,7 +62,19 @@ export function useVoiceMesh({ selfId, hostId, participants, track, attach, remo
   }, [attach, selfId, send, track]);
 
   useEffect(() => subscribe((id, payload) => {
-    if (!allowed.current.has(id) || !payload || typeof payload !== 'object') return;
+    // The host relays these messages from an authenticated viewer data channel.
+    // Accept a valid viewer signal even when React has not committed the newest
+    // roster yet; dropping that first offer leaves both viewers permanently mute.
+    if (
+      !selfId ||
+      !hostId ||
+      selfId === hostId ||
+      id === selfId ||
+      id === hostId ||
+      !/^[a-zA-Z0-9_-]{16,80}$/.test(id) ||
+      !payload ||
+      typeof payload !== 'object'
+    ) return;
     const message = payload as { kind?: string; description?: RTCSessionDescriptionInit; candidate?: RTCIceCandidateInit };
     if (!['offer', 'answer', 'candidate'].includes(message.kind || '')) return;
     const entry = create(id);
@@ -86,12 +97,11 @@ export function useVoiceMesh({ selfId, hostId, participants, track, attach, remo
         if (peers.current.get(id) === entry) send(id, { kind: 'answer', description: pc.localDescription });
       }
     }).catch(() => undefined);
-  }), [create, selfId, send, subscribe, track]);
+  }), [create, hostId, selfId, send, subscribe, track]);
 
   useEffect(() => {
     const ids = new Set(selfId && hostId && selfId !== hostId
       ? participants.filter(p => p.id !== hostId && p.id !== selfId).map(p => p.id) : []);
-    allowed.current = ids;
     for (const id of peers.current.keys()) if (!ids.has(id)) close(id);
     for (const id of ids) {
       if (selfId > id || peers.current.has(id)) continue;
@@ -106,7 +116,6 @@ export function useVoiceMesh({ selfId, hostId, participants, track, attach, remo
 
   useEffect(() => () => {
     for (const id of peers.current.keys()) close(id);
-    allowed.current.clear();
   }, [selfId, hostId, close]);
 
   return useCallback(async (next: MediaStreamTrack | null) => {
