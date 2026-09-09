@@ -677,6 +677,12 @@ export function useLinkcast() {
     };
   }, [refreshLease, stopLoops, stopVoice]);
 
+  const getViewerConnection = useCallback(() => {
+    if (roleRef.current !== 'viewer') return null;
+    return peerConnectionsRef.current.get(hostIdRef.current) ||
+      peerConnectionsRef.current.values().next().value || null;
+  }, []);
+
   return {
     voice: { ...voice, participants },
     laserStrokes,
@@ -685,6 +691,7 @@ export function useLinkcast() {
     roomId,
     viewerCount,
     remoteStream,
+    getViewerConnection,
     error,
     createRoom,
     joinRoom,

@@ -35,6 +35,7 @@ import { useSavedPreference, validDevice, validSensitivity } from '@/hooks/use-s
 import { LaserOverlay } from '@/components/laser-overlay';
 import { createRoomLink, normalizeRoomValue } from '@/lib/room-input';
 import { VoiceControls } from '@/components/voice-controls';
+import { ViewerQualityPanel } from '@/components/viewer-quality-panel';
 
 type DeviceOption = { deviceId: string; label: string };
 type CaptureInfo = { width?: number; height?: number; frameRate?: number };
@@ -219,6 +220,7 @@ export default function Home() {
     roomId,
     viewerCount,
     remoteStream,
+    getViewerConnection,
     error: connectionError,
     createRoom,
     joinRoom,
@@ -1137,7 +1139,10 @@ export default function Home() {
                 {isViewerFullscreen && <button type="button" aria-label="영상 메뉴 열기" onClick={revealViewerControls} className="absolute bottom-2 right-4 z-10 h-11 w-11 rounded-full bg-black/35 text-xl text-white">···</button>}
                 {(!isViewerFullscreen || showViewerControls) && (
                   <div className="absolute inset-x-0 top-0 flex items-center justify-between gap-2 p-2 sm:p-5">
-                    <span className="rounded-full border border-white/10 bg-black/35 px-3 py-1.5 text-xs font-medium text-white/80 backdrop-blur-md">{status === 'connected' ? 'LIVE' : 'CONNECTING'}</span>
+                    <div className="flex items-center gap-2">
+                      <span className="rounded-full border border-white/10 bg-black/35 px-3 py-1.5 text-xs font-medium text-white/80 backdrop-blur-md">{status === 'connected' ? 'LIVE' : 'CONNECTING'}</span>
+                      {remoteStream && <ViewerQualityPanel getConnection={getViewerConnection} />}
+                    </div>
                     <div className="flex shrink-0 items-center gap-1.5 sm:gap-2">
                       {remoteStream && viewerPipSupported && (
                         <Button
