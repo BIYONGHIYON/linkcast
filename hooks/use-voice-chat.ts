@@ -44,6 +44,7 @@ export function useVoiceChat() {
   const onTrack = useRef<((track: MediaStreamTrack | null) => void | Promise<void>) | null>(
     null,
   );
+  const trackUpdates = useRef<Promise<void>>(Promise.resolve());
   const context = useRef<AudioContext | null>(null);
   const raw = useRef<MediaStream | null>(null);
   const analyser = useRef<AnalyserNode | null>(null);
@@ -105,6 +106,18 @@ export function useVoiceChat() {
     [],
   );
 
+  // Keep leave/rejoin track replacements ordered. A slow replaceTrack(null)
+  // from the previous call must never finish after the new microphone track.
+  const publishTrack = useCallback((next: MediaStreamTrack | null) => {
+    const update = trackUpdates.current.catch(() => undefined).then(async () => {
+      const listener = onTrack.current;
+      if (!listener && next) throw new Error('voice_listener_missing');
+      await listener?.(next);
+    });
+    trackUpdates.current = update.catch(() => undefined);
+    return update;
+  }, []);
+
   const attach = useCallback((id: string, incoming: MediaStreamTrack) => {
     if (receivers.current.get(id) === incoming && players.current.has(id)) return;
     receivers.current.set(id, incoming);
@@ -155,7 +168,7 @@ export function useVoiceChat() {
     raw.current = null;
     track.current?.stop();
     track.current = null;
-    void Promise.resolve(onTrack.current?.(null)).catch(() => undefined);
+    void publishTrack(null).catch(() => undefined);
     sources.current.forEach((source) => source.disconnect());
     sources.current.clear();
     players.current.forEach(player => { player.pause(); player.srcObject = null; player.remove(); });
@@ -173,7 +186,7 @@ export function useVoiceChat() {
     setLevel(0);
     setSpeaking(false);
     setPlaybackBlocked(false);
-  }, [setLevel]);
+  }, [publishTrack, setLevel]);
 
   const start = useCallback(async () => {
     if (context.current && context.current.state !== 'closed') return;
@@ -258,8 +271,7 @@ export function useVoiceChat() {
       // room has no peer yet, the current track is picked up when a new peer
       // connection is created.
       try {
-        if (!onTrack.current) throw new Error('voice_listener_missing');
-        await onTrack.current(microphoneTrack);
+        await publishTrack(microphoneTrack);
       } catch {
         throw new Error('voice_sender_failed');
       }
@@ -281,7 +293,7 @@ export function useVoiceChat() {
     } finally {
       if (token === generation.current) setBusy(false);
     }
-  }, [attach, device, resumePlayback, stop, setLevel]);
+  }, [attach, device, publishTrack, resumePlayback, stop, setLevel]);
 
   const toggleMute = useCallback(() => {
     setMuted((current) => {

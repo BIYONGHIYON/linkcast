@@ -13,7 +13,7 @@ const parameters = { degradationPreference: 'maintain-framerate', encodings: [
 const sender = { track: { kind: 'video' }, getParameters: () => parameters,
   async setParameters(next) { calls++; assert.equal(next, parameters); } };
 await configureVideoQuality(sender);
-assert.equal(parameters.degradationPreference, 'balanced');
+assert.equal(parameters.degradationPreference, 'maintain-resolution');
 assert.equal(parameters.encodings[0].maxFramerate, 60);
 assert.equal(parameters.encodings[0].scaleResolutionDownBy, 1);
 assert.equal('maxBitrate' in parameters.encodings[0], false);
@@ -24,4 +24,4 @@ await configureVideoQuality({ ...sender, getParameters: () => ({ encodings: [] }
 await configureVideoQuality({ ...sender, track: { kind: 'audio' } });
 assert.equal(calls, 2, 'skip audio and unnegotiated encodings');
 await assert.rejects(configureVideoQuality({ ...sender, setParameters: async () => { throw new Error('closed'); } }));
-console.log('PASS: balanced policy, uncapped bitrate, original scale, 60 FPS ceiling, renegotiation');
+console.log('PASS: quality-first policy, uncapped bitrate, original scale, 60 FPS ceiling, renegotiation');

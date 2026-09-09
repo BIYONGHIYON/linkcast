@@ -16,7 +16,7 @@ function setup() {
     currentTime = 0;
     audioWorklet = { addModule: async () => {} };
     resume() { return Promise.resolve(); }
-    close() { return Promise.resolve(); }
+    close() { this.state = 'closed'; return Promise.resolve(); }
     createMediaStreamSource() { return node(); }
     createMediaElementSource(player) {
       assert.equal(player.srcObject, undefined, 'reroute before remote playback starts');
@@ -97,6 +97,8 @@ function setup() {
   await voice.resumePlayback();
   assert.equal(state[7], false, 'explicit playback retry clears blocked state');
   voice.stop();
+  await Promise.resolve();
+  await Promise.resolve();
   assert.equal(playback[1].srcObject, null);
   assert.equal(microphone.stopped, true);
   assert.equal(published, null);
@@ -112,4 +114,24 @@ function setup() {
   assert.ok(state.some(value => typeof value === 'string' && value.includes('마이크 전송')));
   assert.equal(microphone.stopped, true, 'release microphone after failed sender');
 }
-console.log('PASS: mono sender handoff, successful join, visible sender failure and microphone cleanup');
+{
+  const { voice } = setup();
+  const sequence = [];
+  let releaseLeave;
+  voice.subscribeTrack(async track => {
+    if (track) { sequence.push('join'); return; }
+    sequence.push('leave-start');
+    await new Promise(resolve => { releaseLeave = resolve; });
+    sequence.push('leave-end');
+  });
+  await voice.start();
+  voice.stop();
+  const rejoin = voice.start();
+  await Promise.resolve();
+  await Promise.resolve();
+  assert.deepEqual(sequence, ['join', 'leave-start'], 'rejoin waits for the previous leave');
+  releaseLeave();
+  await rejoin;
+  assert.deepEqual(sequence, ['join', 'leave-start', 'leave-end', 'join'], 'new microphone wins after leave');
+}
+console.log('PASS: voice playback, sender cleanup, and ordered leave/rejoin track replacement');
