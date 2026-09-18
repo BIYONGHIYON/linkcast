@@ -19,12 +19,12 @@ export class LinkcastRoom extends DurableObject<unknown> {
   private signal(ws: WebSocket, senderId: string, kind: string, payload: unknown = {}) {
     this.send(ws, { type: 'signal', senderId, kind, payload: JSON.stringify(payload), id: 0 });
   }
-  private remove(ws: WebSocket) {
+  private remove(ws: WebSocket, notify = true) {
     const peer = this.peer(ws);
     if (peer.removed) return;
     ws.serializeAttachment({ ...peer, removed: true });
     try { ws.close(1000, 'Disconnected'); } catch { /* already closed */ }
-    if (peer.role === 'viewer') for (const host of this.peers().filter(s => this.peer(s).role === 'host')) this.signal(host, peer.id, 'leave');
+    if (notify && peer.role === 'viewer') for (const host of this.peers().filter(s => this.peer(s).role === 'host')) this.signal(host, peer.id, 'leave');
   }
   private async sweep() {
     for (const ws of this.peers()) {
@@ -67,7 +67,8 @@ export class LinkcastRoom extends DurableObject<unknown> {
       const reconnectingHost = role === 'host' && hostId === id;
       if (role === 'host' && !hostId) await this.ctx.storage.put('host', id);
       if (role === 'host') await this.ctx.storage.delete('hostGone');
-      if (existing) this.remove(existing);
+      // Replacing a socket for the same participant must not tear down healthy P2P media.
+      if (existing) this.remove(existing, false);
       server.serializeAttachment({ id, role, seen: Date.now() } satisfies Peer);
       this.ctx.acceptWebSocket(server);
       this.send(server, { type: 'ready', hostId: role === 'host' ? id : hostId });
@@ -115,7 +116,12 @@ export class LinkcastRoom extends DurableObject<unknown> {
         this.signal(viewer, peer.id, 'host_lost');
       }
     }
-    this.remove(ws);
+    if (peer.role === 'viewer') {
+      for (const host of this.peers().filter(candidate => this.peer(candidate).role === 'host')) {
+        this.signal(host, peer.id, 'leave', { reconnecting: true });
+      }
+    }
+    this.remove(ws, false);
     if (peer.role === 'host') {
       await this.ctx.storage.put('hostGone', Date.now());
       await this.ctx.storage.setAlarm(Date.now() + LEASE_MS);

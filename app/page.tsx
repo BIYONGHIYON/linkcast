@@ -171,6 +171,7 @@ export default function Home() {
   const hostControlsTimerRef = useRef<number | null>(null);
   const viewerControlsTimerRef = useRef<number | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
+  const captureOperationRef = useRef(0);
   const autoJoinRef = useRef('');
   const joiningRef = useRef<Promise<boolean> | null>(null);
   const joiningRoomRef = useRef('');
@@ -194,11 +195,21 @@ export default function Home() {
   const videoVolumeRef = useRef(videoVolume);
   useSavedPreference('linkcast.viewer.volume.v1', videoVolume, setVideoVolume, validSensitivity);
   useEffect(() => {
+    const previousVolume = videoVolumeRef.current;
     videoVolumeRef.current = videoVolume;
     const video = viewerVideoRef.current;
     if (!video) return;
     video.volume = videoVolume / 100;
     if (videoVolume === 0) video.muted = true;
+    else if (previousVolume === 0) {
+      const stream = video.srcObject;
+      video.muted = false;
+      void video.play().catch(() => {
+        if (viewerVideoRef.current !== video || video.srcObject !== stream || videoVolumeRef.current === 0) return;
+        video.muted = true;
+        setPlaybackBlocked(true);
+      });
+    }
   }, [videoVolume]);
   const [viewerVideoReady, setViewerVideoReady] = useState(false);
   const [hostAspectRatio, setHostAspectRatio] = useState<number | null>(null);
@@ -316,8 +327,9 @@ export default function Home() {
   }, [enterViewerPictureInPicture, exitViewerPictureInPicture, remoteStream, viewerVideoReady]);
 
   const stopPreview = useCallback(() => {
+    captureOperationRef.current++;
     void leave();
-    streamRef.current?.getTracks().forEach((track) => track.stop());
+    streamRef.current?.getTracks().forEach((track) => { track.onended = null; track.stop(); });
     streamRef.current = null;
     if (previewVideoRef.current) previewVideoRef.current.srcObject = null;
     setIsPreviewing(false);
@@ -326,6 +338,12 @@ export default function Home() {
     setShowHostControls(true);
     setCaptureInfo({});
   }, [leave]);
+
+  const disposeCapture = useCallback(() => {
+    captureOperationRef.current++;
+    streamRef.current?.getTracks().forEach(track => { track.onended = null; track.stop(); });
+    streamRef.current = null;
+  }, []);
 
   const refreshDevices = useCallback(async () => {
     if (!navigator.mediaDevices?.enumerateDevices) return;
@@ -350,19 +368,27 @@ export default function Home() {
 
   const startPreview = useCallback(
     async (videoDeviceId?: string, audioDeviceId?: string) => {
+      const operation = ++captureOperationRef.current;
       setCaptureError('');
       setHostAspectRatio(null);
+      setIsPreviewing(false);
       await leave();
-      streamRef.current?.getTracks().forEach((track) => track.stop());
+      if (operation !== captureOperationRef.current) return;
+      streamRef.current?.getTracks().forEach((track) => { track.onended = null; track.stop(); });
+      streamRef.current = null;
+      let acquired: MediaStream | null = null;
 
       try {
+        // resizeMode is supported by capture APIs but absent from this DOM type bundle.
+        const videoConstraints: MediaTrackConstraints & { resizeMode: 'none' } = {
+          width: { ideal: 1920 },
+          height: { ideal: 1080 },
+          frameRate: { ideal: 60, max: 60 },
+          resizeMode: 'none',
+          ...(videoDeviceId ? { deviceId: { exact: videoDeviceId } } : {}),
+        };
         const stream = await navigator.mediaDevices.getUserMedia({
-          video: {
-            width: { ideal: 1920 },
-            height: { ideal: 1080 },
-            frameRate: { ideal: 60, max: 60 },
-            ...(videoDeviceId ? { deviceId: { exact: videoDeviceId } } : {}),
-          },
+          video: videoConstraints,
           audio: {
             ...(audioDeviceId ? { deviceId: { exact: audioDeviceId } } : {}),
             echoCancellation: false,
@@ -370,19 +396,36 @@ export default function Home() {
             autoGainControl: false,
           },
         });
+        acquired = stream;
+        if (operation !== captureOperationRef.current) {
+          stream.getTracks().forEach(track => track.stop());
+          return;
+        }
         streamRef.current = stream;
-        if (previewVideoRef.current) {
-          previewVideoRef.current.srcObject = stream;
-          previewVideoRef.current.muted = false;
+        const videoTrack = stream.getVideoTracks()[0];
+        if (!videoTrack) throw new Error('capture_video_missing');
+        videoTrack.contentHint = 'detail';
+        videoTrack.onended = () => {
+          if (operation !== captureOperationRef.current) return;
+          stopPreview();
+          setCaptureError('캡처 장치 연결이 끊겼어요. 장치를 다시 연결해 주세요.');
+        };
+        const preview = previewVideoRef.current;
+        if (preview) {
+          preview.srcObject = stream;
+          preview.muted = false;
           try {
-            await previewVideoRef.current.play();
+            await preview.play();
+            if (operation !== captureOperationRef.current) return;
             setHostAudioEnabled(true);
           } catch {
-            previewVideoRef.current.muted = true;
+            if (operation !== captureOperationRef.current) return;
+            preview.muted = true;
             setHostAudioEnabled(false);
-            await previewVideoRef.current.play();
+            await preview.play();
           }
         }
+        if (operation !== captureOperationRef.current) return;
         const videoSettings = stream.getVideoTracks()[0]?.getSettings();
         const audioSettings = stream.getAudioTracks()[0]?.getSettings();
         if (videoSettings?.width && videoSettings.height) {
@@ -396,16 +439,23 @@ export default function Home() {
         setSelectedDevice(videoSettings?.deviceId || videoDeviceId || '');
         setSelectedAudio(audioSettings?.deviceId || audioDeviceId || '');
         setIsPreviewing(true);
-        await refreshDevices();
+        await refreshDevices().catch(() => undefined);
       } catch (reason) {
+        if (operation !== captureOperationRef.current) return;
+        if (streamRef.current === acquired) streamRef.current = null;
+        if (previewVideoRef.current?.srcObject === acquired) previewVideoRef.current.srcObject = null;
         const message =
           reason instanceof DOMException && reason.name === 'NotAllowedError'
             ? '카메라와 오디오 권한을 허용해 주세요.'
             : '캡처보드를 찾지 못했어요. 연결 상태를 확인해 주세요.';
         setCaptureError(message);
+      } finally {
+        if (acquired && (operation !== captureOperationRef.current || streamRef.current !== acquired)) {
+          acquired.getTracks().forEach(track => { track.onended = null; track.stop(); });
+        }
       }
     },
-    [leave, refreshDevices],
+    [leave, refreshDevices, stopPreview],
   );
 
   const connectViewer = useCallback(
@@ -413,6 +463,7 @@ export default function Home() {
       const normalized = normalizeRoomValue(value);
       if (!normalized) return false;
       if (joiningRef.current && joiningRoomRef.current === normalized) return joiningRef.current;
+      stopPreview();
       joiningRoomRef.current = normalized;
       setJoinValue(normalized);
       setMode('viewer');
@@ -431,7 +482,7 @@ export default function Home() {
       }).catch(() => undefined);
       return pending;
     },
-    [joinRoom],
+    [joinRoom, stopPreview],
   );
 
   useEffect(() => {
@@ -443,33 +494,41 @@ export default function Home() {
   }, [connectViewer]);
 
   useEffect(() => {
-    const timer = window.setTimeout(() => void refreshDevices(), 0);
+    const timer = window.setTimeout(() => void refreshDevices().catch(() => undefined), 0);
     return () => {
       window.clearTimeout(timer);
-      streamRef.current?.getTracks().forEach((track) => track.stop());
+      disposeCapture();
     };
-  }, [refreshDevices]);
+  }, [disposeCapture, refreshDevices]);
 
   useEffect(() => {
     const video = viewerVideoRef.current;
     if (!video) return;
+    let cancelled = false;
+    const updateSize = () => {
+      if (cancelled || !video.videoWidth || !video.videoHeight) return;
+      setViewerAspectRatio(video.videoWidth / video.videoHeight);
+      if (!video.paused) setViewerVideoReady(true);
+    };
 
     setViewerVideoReady(false);
     setPlaybackBlocked(false);
     setViewerAspectRatio(null);
     video.onplaying = () => {
-      setViewerVideoReady(true);
+      if (cancelled) return;
+      updateSize();
       setPlaybackBlocked(video.muted && videoVolumeRef.current > 0);
     };
 
     if (!remoteStream) {
       void exitViewerPictureInPicture();
       video.srcObject = null;
-      return;
+      return () => { cancelled = true; video.onplaying = null; };
     }
 
     const tryPlay = () => {
       void video.play().catch((reason: unknown) => {
+        if (cancelled || video.srcObject !== remoteStream) return;
         if (reason instanceof DOMException && reason.name === 'NotAllowedError') {
           setPlaybackBlocked(true);
           // A shared link has no user gesture: show video immediately, then unlock audio on tap.
@@ -483,14 +542,15 @@ export default function Home() {
     video.muted = videoVolumeRef.current === 0;
     video.srcObject = remoteStream;
     video.onloadedmetadata = () => {
-      if (video.videoWidth && video.videoHeight) {
-        setViewerAspectRatio(video.videoWidth / video.videoHeight);
-      }
+      updateSize();
       tryPlay();
     };
+    video.addEventListener('resize', updateSize);
     tryPlay();
 
     return () => {
+      cancelled = true;
+      video.removeEventListener('resize', updateSize);
       video.onplaying = null;
       video.onloadedmetadata = null;
     };
@@ -597,8 +657,16 @@ export default function Home() {
     const video = previewVideoRef.current;
     if (video?.videoWidth && video.videoHeight) {
       setHostAspectRatio(video.videoWidth / video.videoHeight);
+      setCaptureInfo(current => ({ ...current, width: video.videoWidth, height: video.videoHeight }));
     }
   }, []);
+
+  useEffect(() => {
+    const video = previewVideoRef.current;
+    if (!video) return;
+    video.addEventListener('resize', updateHostAspectRatio);
+    return () => video.removeEventListener('resize', updateHostAspectRatio);
+  }, [mode, isPreviewing, updateHostAspectRatio]);
 
   const copyText = useCallback(
     async (value: string, onSuccess: () => void, failureMessage: string) => {
@@ -687,7 +755,10 @@ export default function Home() {
     nativeViewerFullscreenRef.current = false;
     viewportHostFullscreenRef.current = false;
     viewportViewerFullscreenRef.current = false;
-    void leave();
+    setIsHostFullscreen(false);
+    setIsViewerFullscreen(false);
+    if (mode === 'host') stopPreview();
+    else void leave();
     setMode(nextMode);
     setJoinValue('');
     setShowHostControls(true);

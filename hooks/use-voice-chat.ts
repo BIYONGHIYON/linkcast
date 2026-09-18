@@ -52,8 +52,10 @@ export function useVoiceChat() {
   const analysisTimer = useRef<number | null>(null);
   const output = useRef<GainNode | null>(null);
   const receivers = useRef(new Map<string, MediaStreamTrack>());
+  const clearReceivers = useCallback(() => receivers.current.clear(), []);
   const sources = useRef(new Map<string, MediaElementAudioSourceNode>());
   const players = useRef(new Map<string, HTMLAudioElement>());
+  const blockedPlayers = useRef(new Set<string>());
   const generation = useRef(0);
   const volumeRef = useRef(volume);
   const sensitivityRef = useRef(sensitivity);
@@ -77,8 +79,23 @@ export function useVoiceChat() {
 
     try {
       // Start media playback before the first await to retain user activation.
-      const playing = Promise.all([...players.current.values()].map(player => player.play()));
-      await Promise.all([audio.resume(), playing]);
+      players.current.forEach((player, id) => {
+        void player.play().then(() => {
+          if (context.current !== audio || players.current.get(id) !== player) return;
+          blockedPlayers.current.delete(id);
+          setPlaybackBlocked(audio.state !== 'running' || blockedPlayers.current.size > 0);
+        }).catch((reason: unknown) => {
+          if (context.current !== audio || players.current.get(id) !== player) return;
+          if (reason instanceof DOMException && reason.name === 'NotAllowedError') {
+            blockedPlayers.current.add(id);
+            setPlaybackBlocked(true);
+          }
+        });
+      });
+      // A remote track without packets can keep play() pending. It must not
+      // hold up every other participant or microphone acquisition.
+      await audio.resume();
+      if (context.current !== audio) return;
       const sink = (videoOutput.current as (HTMLMediaElement & { sinkId?: string }) | null)?.sinkId || '';
       const sinkable = audio as SinkableAudioContext;
       // AudioContext.setSinkId is not supported everywhere. If copying the
@@ -89,10 +106,11 @@ export function useVoiceChat() {
       }
       await Promise.all([...players.current.values()].map(player =>
         typeof player.setSinkId === 'function' ? player.setSinkId(sink).catch(() => undefined) : Promise.resolve()));
+      if (context.current !== audio) return;
       if (audio.state !== 'running') throw new Error('audio_context_suspended');
-      setPlaybackBlocked(false);
+      setPlaybackBlocked(blockedPlayers.current.size > 0);
     } catch {
-      setPlaybackBlocked(true);
+      if (context.current === audio) setPlaybackBlocked(true);
     }
   }, []);
 
@@ -109,7 +127,9 @@ export function useVoiceChat() {
   // Keep leave/rejoin track replacements ordered. A slow replaceTrack(null)
   // from the previous call must never finish after the new microphone track.
   const publishTrack = useCallback((next: MediaStreamTrack | null) => {
+    const token = generation.current;
     const update = trackUpdates.current.catch(() => undefined).then(async () => {
+      if (token !== generation.current || (next && next.readyState === 'ended')) return;
       const listener = onTrack.current;
       if (!listener && next) throw new Error('voice_listener_missing');
       await listener?.(next);
@@ -124,6 +144,7 @@ export function useVoiceChat() {
     const previous = players.current.get(id);
     if (previous) { previous.pause(); previous.srcObject = null; previous.remove(); }
     players.current.delete(id);
+    blockedPlayers.current.delete(id);
     sources.current.get(id)?.disconnect();
     sources.current.delete(id);
     if (!context.current || !output.current || incoming.kind !== 'audio' || incoming.readyState === 'ended') {
@@ -155,6 +176,8 @@ export function useVoiceChat() {
     const player = players.current.get(id);
     if (player) { player.pause(); player.srcObject = null; player.remove(); }
     players.current.delete(id);
+    blockedPlayers.current.delete(id);
+    if (context.current?.state === 'running') setPlaybackBlocked(blockedPlayers.current.size > 0);
     sources.current.get(id)?.disconnect();
     sources.current.delete(id);
     receivers.current.delete(id);
@@ -164,7 +187,7 @@ export function useVoiceChat() {
     generation.current++;
     if (analysisTimer.current) window.clearInterval(analysisTimer.current);
     analysisTimer.current = null;
-    raw.current?.getTracks().forEach((current) => current.stop());
+    raw.current?.getTracks().forEach((current) => { current.onended = null; current.stop(); });
     raw.current = null;
     track.current?.stop();
     track.current = null;
@@ -173,11 +196,15 @@ export function useVoiceChat() {
     sources.current.clear();
     players.current.forEach(player => { player.pause(); player.srcObject = null; player.remove(); });
     players.current.clear();
+    blockedPlayers.current.clear();
     inputGraph.current.forEach((node) => node.disconnect());
     inputGraph.current = [];
     analyser.current = null;
     analysisBuffer.current = null;
-    void context.current?.close().catch(() => undefined);
+    if (context.current) {
+      context.current.onstatechange = null;
+      void context.current.close().catch(() => undefined);
+    }
     context.current = null;
     output.current = null;
     setEnabled(false);
@@ -198,6 +225,10 @@ export function useVoiceChat() {
     try {
       const audio = new AudioContext({ latencyHint: 'interactive' });
       context.current = audio;
+      setPlaybackBlocked(audio.state !== 'running');
+      audio.onstatechange = () => {
+        if (context.current === audio) setPlaybackBlocked(audio.state !== 'running' || blockedPlayers.current.size > 0);
+      };
       output.current = audio.createGain();
       output.current.gain.value = volumeRef.current / 100;
       output.current.connect(audio.destination);
@@ -205,10 +236,9 @@ export function useVoiceChat() {
 
       // This runs during the call-button gesture, so the AudioContext is
       // unlocked before a permission prompt or signaling round trip occurs.
-      await resumePlayback();
-      if (token !== generation.current) return;
+      void resumePlayback();
 
-      const stream = await navigator.mediaDevices.getUserMedia({
+      const constraints: MediaStreamConstraints = {
         audio: {
           deviceId: device ? { exact: device } : undefined,
           echoCancellation: true,
@@ -219,16 +249,25 @@ export function useVoiceChat() {
           channelCount: 1,
         },
         video: false,
-      });
+      };
+      let stream: MediaStream;
+      try {
+        stream = await navigator.mediaDevices.getUserMedia(constraints);
+      } catch (reason) {
+        if (token !== generation.current) return;
+        if (!device || !(reason instanceof DOMException) || !['NotFoundError', 'OverconstrainedError'].includes(reason.name)) throw reason;
+        // Saved device IDs can disappear after unplugging a USB microphone.
+        stream = await navigator.mediaDevices.getUserMedia({ ...constraints, audio: { ...(constraints.audio as MediaTrackConstraints), deviceId: undefined } });
+        if (token === generation.current) setDevice('');
+      }
       if (token !== generation.current) {
         stream.getTracks().forEach((current) => current.stop());
         return;
       }
-      await resumePlayback();
-
+      raw.current = stream;
+      void resumePlayback();
       const microphoneTrack = stream.getAudioTracks()[0];
       if (!microphoneTrack) throw new Error('microphone_track_missing');
-      raw.current = stream;
 
       // Send the browser's live microphone track directly over WebRTC. The
       // analyser is only for the local level/speaking indicator and never
@@ -246,6 +285,7 @@ export function useVoiceChat() {
       );
       inputGraph.current.push(microphoneSource, meter, silentMonitor);
 
+      let speakingUntil = 0;
       const updateMeter = () => {
         if (token !== generation.current || context.current !== audio || audio.state === 'closed') return;
         const currentAnalyser = analyser.current;
@@ -257,14 +297,18 @@ export function useVoiceChat() {
         const rms = Math.sqrt(energy / buffer.length);
         const live = microphoneTrack.enabled && microphoneTrack.readyState === 'live';
         setLevel(live ? Math.min(100, rms * 500) : 0);
-        setSpeaking(live && rms >= thresholdForSensitivity(sensitivityRef.current));
+        if (live && rms >= thresholdForSensitivity(sensitivityRef.current)) speakingUntil = performance.now() + 180;
+        setSpeaking(live && performance.now() < speakingUntil);
       };
       updateMeter();
       analysisTimer.current = window.setInterval(updateMeter, 50);
 
       track.current = microphoneTrack;
       microphoneTrack.onended = () => {
-        if (token === generation.current) stop();
+        if (token === generation.current) {
+          stop();
+          setError('마이크 연결이 끊겼어요. 장치를 확인하고 통화를 다시 시작해 주세요.');
+        }
       };
 
       // Install the track into every already-negotiated voice sender. If the
@@ -316,17 +360,30 @@ export function useVoiceChat() {
 
   useEffect(() => {
     let live = true;
-    void navigator.mediaDevices
-      ?.enumerateDevices()
+    const refreshDevices = () => { void navigator.mediaDevices?.enumerateDevices()
       .then((available) => {
         if (live) setDevices(available.filter((current) => current.kind === 'audioinput'));
       })
-      .catch(() => undefined);
+      .catch(() => undefined); };
+    const resume = () => {
+      if (document.visibilityState === 'visible' && context.current &&
+        (context.current.state !== 'running' || blockedPlayers.current.size > 0)) void resumePlayback();
+    };
+    refreshDevices();
+    navigator.mediaDevices?.addEventListener('devicechange', refreshDevices);
+    document.addEventListener('visibilitychange', resume);
+    window.addEventListener('pointerdown', resume);
+    window.addEventListener('keydown', resume);
     return () => {
       live = false;
+      navigator.mediaDevices?.removeEventListener('devicechange', refreshDevices);
+      document.removeEventListener('visibilitychange', resume);
+      window.removeEventListener('pointerdown', resume);
+      window.removeEventListener('keydown', resume);
       stop();
+      clearReceivers();
     };
-  }, [stop]);
+  }, [clearReceivers, resumePlayback, stop]);
 
   return {
     enabled,

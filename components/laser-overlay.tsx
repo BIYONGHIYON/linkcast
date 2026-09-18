@@ -33,6 +33,7 @@ export function LaserOverlay({ ratio, strokes, onSend }: { ratio: number; stroke
   }, [ratio]);
   const point = (event: { clientX: number; clientY: number }, element: SVGSVGElement): LaserPoint => {
     const rect = element.getBoundingClientRect();
+    if (rect.width <= 0 || rect.height <= 0) return { x: NaN, y: NaN };
     return { x: Math.max(0, Math.min(1, (event.clientX - rect.left) / rect.width)), y: Math.max(0, Math.min(1, (event.clientY - rect.top) / rect.height)) };
   };
   const appendPoint = (sample: { clientX: number; clientY: number }, element: SVGSVGElement, force = false) => {
@@ -83,7 +84,9 @@ export function LaserOverlay({ ratio, strokes, onSend }: { ratio: number; stroke
         event.preventDefault();
         const element = event.currentTarget;
         const pointerId = event.pointerId;
-        active.current = { pointerId: event.pointerId, points: [point(event, event.currentTarget)] };
+        const first = point(event, element);
+        if (!Number.isFinite(first.x) || !Number.isFinite(first.y)) return;
+        active.current = { pointerId, points: [first] };
         setDraft([...active.current.points]);
         // Capture may fail or be released before pointerup, especially on quick gestures.
         // Window listeners keep the release/end point, even outside the video.
@@ -95,18 +98,29 @@ export function LaserOverlay({ ratio, strokes, onSend }: { ratio: number; stroke
         const cancel = (native: globalThis.PointerEvent) => {
           if (native.pointerId === pointerId) finish(pointerId);
         };
+        const move = (native: globalThis.PointerEvent) => {
+          if (native.pointerId !== pointerId || active.current?.pointerId !== pointerId) return;
+          if (native.cancelable) native.preventDefault();
+          for (const sample of [...(native.getCoalescedEvents?.() || []), native]) appendPoint(sample, element);
+          setDraft([...active.current.points]);
+        };
         const blur = () => finish(pointerId);
-        window.addEventListener('pointerup', release);
-        window.addEventListener('pointercancel', cancel);
+        const visibility = () => { if (document.visibilityState === 'hidden') finish(pointerId); };
+        // Capture phase also catches releases over controls that stop bubbling.
+        window.addEventListener('pointermove', move, { capture: true, passive: false });
+        window.addEventListener('pointerup', release, true);
+        window.addEventListener('pointercancel', cancel, true);
         window.addEventListener('blur', blur);
+        document.addEventListener('visibilitychange', visibility);
         releaseListeners.current = () => {
-          window.removeEventListener('pointerup', release);
-          window.removeEventListener('pointercancel', cancel);
+          window.removeEventListener('pointermove', move, true);
+          window.removeEventListener('pointerup', release, true);
+          window.removeEventListener('pointercancel', cancel, true);
           window.removeEventListener('blur', blur);
+          document.removeEventListener('visibilitychange', visibility);
         };
         try { element.setPointerCapture(pointerId); } catch { /* Window release listener remains active. */ }
       }}
-      onPointerMove={append}
       onPointerUp={event => {
         if (active.current?.pointerId !== event.pointerId) return;
         append(event, true);

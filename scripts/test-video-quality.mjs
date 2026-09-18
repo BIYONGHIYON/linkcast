@@ -4,7 +4,9 @@ import { runInNewContext } from 'node:vm';
 import ts from 'typescript';
 const source = await readFile(new URL('../lib/video-quality.ts', import.meta.url), 'utf8');
 const exports = {};
-runInNewContext(ts.transpileModule(source, { compilerOptions: { module: ts.ModuleKind.CommonJS } }).outputText, { exports });
+runInNewContext(ts.transpileModule(source, { compilerOptions: { module: ts.ModuleKind.CommonJS } }).outputText, {
+  exports, require: () => ({ updateSender: (_sender, update) => update() }), DOMException,
+});
 const { configureVideoQuality } = exports;
 let calls = 0;
 const parameters = { degradationPreference: 'maintain-framerate', encodings: [

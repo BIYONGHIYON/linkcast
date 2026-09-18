@@ -41,6 +41,7 @@ function setup() {
   const exports = {};
   const playback = [];
   runInNewContext(compiled, { exports, require: id => id === 'react' ? hooks : { useSavedPreference() {} }, AudioContext,
+    performance, DOMException,
     MediaStream: class { constructor(tracks) { this.tracks = tracks; } },
     document: { body: { appendChild(element) { element.connected = true; } } },
     window: { setInterval: () => 1, clearInterval() {} },
@@ -90,7 +91,7 @@ function setup() {
   assert.equal(playback[0].srcObject, null);
   assert.equal(playback[0].connected, false);
   voice.attach('peer', incoming);
-  playback[1].play = () => Promise.reject(new Error('NotAllowedError'));
+  playback[1].play = () => Promise.reject(new DOMException('Autoplay blocked', 'NotAllowedError'));
   await voice.resumePlayback();
   assert.equal(state[7], true, 'autoplay rejection exposes the playback unlock control');
   playback[1].play = () => Promise.resolve();
@@ -117,21 +118,13 @@ function setup() {
 {
   const { voice } = setup();
   const sequence = [];
-  let releaseLeave;
   voice.subscribeTrack(async track => {
     if (track) { sequence.push('join'); return; }
     sequence.push('leave-start');
-    await new Promise(resolve => { releaseLeave = resolve; });
-    sequence.push('leave-end');
   });
   await voice.start();
   voice.stop();
-  const rejoin = voice.start();
-  await Promise.resolve();
-  await Promise.resolve();
-  assert.deepEqual(sequence, ['join', 'leave-start'], 'rejoin waits for the previous leave');
-  releaseLeave();
-  await rejoin;
-  assert.deepEqual(sequence, ['join', 'leave-start', 'leave-end', 'join'], 'new microphone wins after leave');
+  await voice.start();
+  assert.deepEqual(sequence, ['join', 'join'], 'obsolete leave update cannot replace the new microphone');
 }
 console.log('PASS: voice playback, sender cleanup, and ordered leave/rejoin track replacement');

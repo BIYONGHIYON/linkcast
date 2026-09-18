@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import { runInNewContext } from 'node:vm';
+import { webcrypto } from 'node:crypto';
 import ts from 'typescript';
 
 const source = await readFile(new URL('../hooks/use-voice-mesh.ts', import.meta.url), 'utf8');
@@ -31,9 +32,12 @@ function client(selfId, visiblePeerIds) {
     async addIceCandidate() {}
     close() { this.closed = true; }
   }
-  runInNewContext(compiled, { exports, require: () => ({
+  runInNewContext(compiled, { exports, require: name => name === 'react' ? {
     useRef: current => ({ current }), useCallback: fn => fn, useEffect: fn => effects.push(fn),
-  }), RTCPeerConnection: Peer, window: { setTimeout, clearTimeout } });
+  } : name === '../lib/rtc-connection' ? {
+    rtcConfiguration: {}, updateConnection: (_pc, update) => update(), matchesRemoteIce: () => true,
+  } : { replaceSenderTrack: (sender, next) => sender.replaceTrack(next) },
+  RTCPeerConnection: Peer, window: { setTimeout, clearTimeout }, crypto: webcrypto });
   const received = [];
   const microphone = { kind: 'audio', id: selfId };
   const replace = exports.useVoiceMesh({ selfId, hostId: 'host',

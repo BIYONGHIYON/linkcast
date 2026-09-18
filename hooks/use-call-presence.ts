@@ -1,15 +1,16 @@
 'use client';
 import { useCallback, useEffect, useRef, useState } from 'react';
+import { queueDataChannel, type DataChannelTransport } from '../lib/data-channel';
 
 export type CallParticipant = { id: string; label: string; enabled: boolean; muted: boolean; speaking: boolean };
 type State = Pick<CallParticipant, 'enabled' | 'muted' | 'speaking'>;
-function send(channel: RTCDataChannel, message: unknown) {
-  if (channel.readyState === 'open') { try { channel.send(JSON.stringify(message)); } catch { /* Connection closed. */ } }
+function send(channel: DataChannelTransport, message: unknown, key?: string) {
+  return channel.send(JSON.stringify(message), key);
 }
 export function useCallPresence(local: State) {
   const { enabled, muted, speaking } = local;
   const [participants, setParticipants] = useState<CallParticipant[]>([]);
-  const channels = useRef(new Map<string, RTCDataChannel>());
+  const channels = useRef(new Map<string, DataChannelTransport>());
   const peers = useRef(new Map<string, CallParticipant>());
   const state = useRef(local);
   const identity = useRef({ host: false, id: '' });
@@ -27,26 +28,29 @@ export function useCallPresence(local: State) {
     if (identity.current.host) {
       const roster = [{ ...state.current, id: identity.current.id, label: '송출자' }, ...peers.current.values()];
       setParticipants([...peers.current.values()]);
-      channels.current.forEach(channel => send(channel, { type: 'roster', roster }));
-    } else channels.current.forEach(channel => send(channel, { type: 'state', ...state.current }));
+      channels.current.forEach(channel => send(channel, { type: 'roster', roster }, 'roster'));
+    } else channels.current.forEach(channel => send(channel, { type: 'state', ...state.current }, 'state'));
   }, []);
   useEffect(() => { state.current = { enabled, muted, speaking }; publish(); }, [enabled, muted, speaking, publish]);
   const remove = useCallback((id: string) => {
     const channel = channels.current.get(id);
     channels.current.delete(id); peers.current.delete(id);
-    if (channel) { channel.onclose = null; channel.close(); }
+    channel?.close();
     if (!identity.current.host) setParticipants([]);
     publish();
   }, [publish]);
-  const register = useCallback((id: string, connection: RTCPeerConnection, host: boolean, selfId: string) => {
+  const isOpen = useCallback((id: string) => channels.current.get(id)?.channel.readyState === 'open', []);
+  const register = useCallback((id: string, connection: RTCPeerConnection, host: boolean, selfId: string, onStateChange?: () => void) => {
     identity.current = { host, id: selfId };
+    channels.current.get(id)?.close();
     const channel = connection.createDataChannel('call-presence', { negotiated: true, id: 1, ordered: true });
-    channels.current.set(id, channel);
+    const transport = queueDataChannel(channel);
+    channels.current.set(id, transport);
     if (host) peers.current.set(id, { id, label: `참가자 ${++index.current}`, enabled: false, muted: false, speaking: false });
-    channel.onopen = publish;
-    channel.onclose = () => { if (channels.current.get(id) === channel) remove(id); };
+    channel.onopen = () => { publish(); onStateChange?.(); };
+    channel.onclose = () => { if (channels.current.get(id) === transport) { remove(id); onStateChange?.(); } };
     channel.onmessage = event => {
-      if (channels.current.get(id) !== channel || typeof event.data !== 'string' || event.data.length > 65536) return;
+      if (channels.current.get(id) !== transport || typeof event.data !== 'string' || event.data.length > 65536) return;
       try {
         const message = JSON.parse(event.data);
         if (message.type === 'voice-signal') {
@@ -59,7 +63,8 @@ export function useCallPresence(local: State) {
           return;
         }
         if (host && message.type === 'state' && ['enabled', 'muted', 'speaking'].every(key => typeof message[key] === 'boolean')) {
-          const previous = peers.current.get(id)!;
+          const previous = peers.current.get(id);
+          if (!previous) return;
           peers.current.set(id, { ...previous, enabled: message.enabled, muted: message.muted, speaking: message.speaking });
           publish();
         } else if (!host && message.type === 'roster' && Array.isArray(message.roster) && message.roster.length <= 6) {
@@ -71,8 +76,10 @@ export function useCallPresence(local: State) {
     publish();
   }, [publish, remove]);
   const clear = useCallback(() => {
-    channels.current.forEach(c => { c.onclose = null; c.close(); }); channels.current.clear(); peers.current.clear(); index.current = 0; setParticipants([]);
+    channels.current.forEach(c => c.close()); channels.current.clear(); peers.current.clear(); index.current = 0;
+    identity.current = { host: false, id: '' };
+    setParticipants([]);
   }, []);
   useEffect(() => clear, [clear]);
-  return { participants, register, remove, clear, signalVoice, subscribeVoice };
+  return { participants, register, remove, clear, signalVoice, subscribeVoice, isOpen };
 }

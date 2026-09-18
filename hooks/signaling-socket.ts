@@ -15,7 +15,8 @@ export class SignalingSocket {
   private session: { roomId: string; peerId: string; role: string } | null = null;
   private hostId = '';
   private connecting: Promise<{ hostId: string }> | null = null;
-  onStatus: ((connected: boolean) => void) | null = null;
+  private ready = false;
+  onStatus: ((connected: boolean, error?: string) => void) | null = null;
 
   subscribe(listener: (signal: SocketSignal) => void) {
     this.listener = listener;
@@ -26,6 +27,7 @@ export class SignalingSocket {
     else if (this.pending.length < 256) this.pending.push(signal);
   }
   private connect(): Promise<{ hostId: string }> {
+    if (this.ready && this.socket?.readyState === WebSocket.OPEN) return Promise.resolve({ hostId: this.hostId });
     if (this.connecting) return this.connecting;
     const operation = this.openSocket();
     this.connecting = operation;
@@ -40,7 +42,7 @@ export class SignalingSocket {
     this.timer = setTimeout(() => {
       this.timer = null;
       void this.connect().catch(error => {
-        if (['room_forbidden', 'room_full'].includes(error.name)) return;
+        if (['room_forbidden', 'room_full', 'room_offline', 'room_not_found'].includes(error.name)) return;
         this.reconnect();
       });
     }, Math.min(400 * 2 ** Math.min(this.attempts++, 6), 15000) + Math.random() * 200);
@@ -48,6 +50,7 @@ export class SignalingSocket {
   private openSocket(): Promise<{ hostId: string }> {
     const session = this.session!;
     const generation = ++this.generation;
+    this.ready = false;
     const url = new URL('/api/socket', getLinkcastOrigin(window.location.href));
     url.protocol = url.protocol === 'https:' ? 'wss:' : 'ws:';
     Object.entries(session).forEach(([key, value]) => url.searchParams.set(key, value));
@@ -63,8 +66,10 @@ export class SignalingSocket {
         try {
           const message = JSON.parse(event.data);
           if (message.type === 'ready') {
+            if (typeof message.hostId !== 'string' || !message.hostId) return;
             clearTimeout(timeout);
             ready = true;
+            this.ready = true;
             this.hostId = message.hostId;
             this.attempts = 0;
             this.lastPong = Date.now();
@@ -79,7 +84,9 @@ export class SignalingSocket {
             clearTimeout(timeout);
             terminal = true;
             const error = new Error(message.error); error.name = message.error;
+            this.onStatus?.(false, error.name);
             reject(error);
+            ws.close();
           } else if (message.type === 'signal') {
             this.emit(message);
             if ((message.kind === 'room_closed' || message.kind === 'leave') && session.role === 'viewer' && message.senderId === this.hostId) {
@@ -94,9 +101,14 @@ export class SignalingSocket {
         clearTimeout(timeout);
         if (!ready) reject(new Error('socket_closed'));
         if (generation !== this.generation || this.stopped) return;
+        this.ready = false;
+        this.socket = null;
         if (this.heartbeat) clearInterval(this.heartbeat);
-        this.onStatus?.(false);
-        if (ready && !terminal) this.reconnect();
+        this.heartbeat = null;
+        if (!terminal) {
+          this.onStatus?.(false);
+          this.reconnect();
+        }
       };
       ws.onerror = () => ws.close();
     });
@@ -104,18 +116,30 @@ export class SignalingSocket {
   async request<T>(path: string, init?: RequestInit): Promise<T> {
     const body = JSON.parse(typeof init?.body === 'string' ? init.body : '{}');
     if (path === '/api/signals') {
-      if (this.socket?.readyState !== WebSocket.OPEN) throw new Error('socket_not_ready');
+      const session = this.session;
+      if (!session || body.roomId !== session.roomId || body.senderId !== session.peerId) throw new Error('stale_session');
+      // A WebSocket can be open before room admission completes. Wait for ready,
+      // including during reconnect, instead of losing SDP and ICE candidates.
+      if (!this.ready || this.socket?.readyState !== WebSocket.OPEN) {
+        if (this.timer) clearTimeout(this.timer);
+        this.timer = null;
+        await this.connectWithRetry();
+      }
+      if (this.session !== session || this.stopped) throw new Error('stale_session');
+      if (!this.ready || this.socket?.readyState !== WebSocket.OPEN) throw new Error('socket_not_ready');
       this.socket.send(JSON.stringify(body));
       return {} as T;
     }
     if (init?.method === 'PATCH') { this.resume(); return { active: true } as T; }
     if (init?.method === 'DELETE') { this.close(); return {} as T; }
     if (this.session?.peerId === body.peerId && this.session?.roomId === body.roomId) {
-      if (this.socket?.readyState !== WebSocket.OPEN) {
+      const session = this.session;
+      if (!this.ready || this.socket?.readyState !== WebSocket.OPEN) {
         if (this.timer) clearTimeout(this.timer);
         this.timer = null;
-        return await this.connectWithRetry() as T;
+        await this.connectWithRetry();
       }
+      if (this.session !== session || this.stopped || this.socket?.readyState !== WebSocket.OPEN) throw new Error('stale_session');
       this.socket.send(JSON.stringify({ kind: 'join', recipientId: this.hostId, payload: { reset: true } }));
       return { hostId: this.hostId } as T;
     }
@@ -133,7 +157,7 @@ export class SignalingSocket {
         return await this.connect();
       } catch (error) {
         const name = error instanceof Error ? error.name : '';
-        if (['room_forbidden', 'room_full'].includes(name) || attempts >= 7) throw error;
+        if (['room_forbidden', 'room_full', 'room_offline', 'room_not_found'].includes(name) || attempts >= 7) throw error;
         await new Promise((resolve) => setTimeout(resolve, Math.min(500 * 2 ** attempts++, 3000)));
       }
     }
@@ -152,6 +176,7 @@ export class SignalingSocket {
   }
   close() {
     this.stopped = true;
+    this.ready = false;
     this.generation++;
     if (this.timer) clearTimeout(this.timer);
     if (this.heartbeat) clearInterval(this.heartbeat);

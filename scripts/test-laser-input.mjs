@@ -19,8 +19,10 @@ const fakeWindow = {
   addEventListener: (kind, handler) => listeners.set(kind, handler),
   removeEventListener: (kind, handler) => { if (listeners.get(kind) === handler) listeners.delete(kind); },
 };
+const fakeDocument = { ...fakeWindow, visibilityState: 'visible' };
 runInNewContext(compiled, {
   window: fakeWindow,
+  document: fakeDocument,
   require: name => name === 'react'
     ? hooks
     : name === '@/hooks/use-laser-strokes'
@@ -36,7 +38,7 @@ for (const ending of ['onPointerUp', 'onPointerCancel', 'windowRelease']) {
   const tree = compiledModule.exports.LaserOverlay({ ratio: 16 / 9, strokes: [], onSend: points => sent.push(points) });
   const handlers = tree.props.children.props;
   handlers.onPointerDown(event(20));
-  handlers.onPointerMove(event(100));
+  listeners.get('pointermove')(event(100));
   handlers.onPointerCancel(event(100, 2));
   assert.equal(sent.length, 0, 'another finger must not end this stroke');
   if (ending === 'windowRelease') listeners.get('pointerup')(event(140));
@@ -68,7 +70,7 @@ for (const duration of [0, 1, 5, 10, 16]) {
     const handlers = compiledModule.exports.LaserOverlay({ ratio: 16 / 9, strokes: [], onSend: p => sent.push(p) }).props.children.props;
     const mouse = (x, timeStamp) => ({ ...event(x), pointerType: 'mouse', timeStamp });
     handlers.onPointerDown(mouse(20, 100));
-    if (moveArrives) handlers.onPointerMove(mouse(300, 100 + duration / 2));
+    if (moveArrives) listeners.get('pointermove')(mouse(300, 100 + duration / 2));
     handlers.onPointerUp(mouse(600, 100 + duration));
     assert.equal(sent.length, 1, `rapid ${duration}ms gesture must be sent once`);
     assert.equal(sent[0][0].x, 20 / 640);
