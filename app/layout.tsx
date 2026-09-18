@@ -15,6 +15,10 @@ const geistMono = Geist_Mono({
 export const metadata: Metadata = {
   title: 'Linkcast — 초저지연 P2P 영상 공유',
   description: '1080p 60fps 영상을 링크 하나로 직접 공유하세요.',
+  icons: {
+    icon: [{ url: '/favicon.svg?v=2', type: 'image/svg+xml' }],
+    shortcut: '/favicon.svg?v=2',
+  },
 };
 
 export const viewport: Viewport = {
