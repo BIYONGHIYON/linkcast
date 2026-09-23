@@ -212,6 +212,7 @@ export default function Home() {
     }
   }, [videoVolume]);
   const [viewerVideoReady, setViewerVideoReady] = useState(false);
+  const [stalledViewerStream, setStalledViewerStream] = useState<MediaStream | null>(null);
   const [hostAspectRatio, setHostAspectRatio] = useState<number | null>(null);
   const [viewerAspectRatio, setViewerAspectRatio] = useState<number | null>(null);
   const [isHostFullscreen, setIsHostFullscreen] = useState(false);
@@ -235,6 +236,12 @@ export default function Home() {
     joinRoom,
     leave,
   } = useLinkcast();
+
+  useEffect(() => {
+    if (!remoteStream || viewerVideoReady) return;
+    const timer = window.setTimeout(() => setStalledViewerStream(remoteStream), 8000);
+    return () => window.clearTimeout(timer);
+  }, [remoteStream, viewerVideoReady]);
 
   const shareUrl = useMemo(() => {
     if (!roomId || typeof window === 'undefined') return '';
@@ -545,11 +552,17 @@ export default function Home() {
       updateSize();
       tryPlay();
     };
+    // Safari can report an audio track before the video track starts. Retry
+    // playback when video becomes available and when its dimensions appear.
+    for (const track of remoteStream.getVideoTracks()) track.addEventListener('unmute', tryPlay);
+    video.addEventListener('loadeddata', updateSize);
     video.addEventListener('resize', updateSize);
     tryPlay();
 
     return () => {
       cancelled = true;
+      for (const track of remoteStream.getVideoTracks()) track.removeEventListener('unmute', tryPlay);
+      video.removeEventListener('loadeddata', updateSize);
       video.removeEventListener('resize', updateSize);
       video.onplaying = null;
       video.onloadedmetadata = null;
@@ -1199,7 +1212,17 @@ export default function Home() {
                     <div>
                       <span className="mx-auto mb-5 block size-3 animate-pulse rounded-full bg-[#58d68d] shadow-[0_0_0_8px_rgba(88,214,141,0.1)]" />
                       <h2 className="text-xl font-medium">송출자와 연결 중</h2>
-                      <p className="mt-2 text-sm text-white/45">직접 연결 경로를 찾고 있어요</p>
+                      <p className="mt-2 text-sm text-white/65">{connectionError || (remoteStream ? '영상을 재생하고 있어요' : '직접 연결 경로를 찾고 있어요')}</p>
+                      {remoteStream && stalledViewerStream === remoteStream && (
+                        <Button className="mt-5 rounded-full bg-white text-[#0b0d0f] hover:bg-white/90" onClick={() => {
+                          const video = viewerVideoRef.current;
+                          if (!video) return;
+                          video.srcObject = null;
+                          video.srcObject = remoteStream;
+                          video.muted = true;
+                          void video.play().catch(() => setPlaybackBlocked(true));
+                        }}>영상 재생 다시 시도</Button>
+                      )}
                     </div>
                   </div>
                 )}

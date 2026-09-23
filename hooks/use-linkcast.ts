@@ -11,6 +11,7 @@ import { queueDataChannel, type DataChannelTransport } from '../lib/data-channel
 import { replaceSenderTrack } from '../lib/rtc-sender';
 import { matchesRemoteIce, rtcConfiguration, updateConnection } from '../lib/rtc-connection';
 import { cancelPeerRecovery, schedulePeerRecovery } from '../lib/peer-recovery';
+import { mergeRemoteStream } from '../lib/remote-stream';
 
 type Role = 'host' | 'viewer';
 export type LaserPoint = { x: number; y: number };
@@ -193,6 +194,13 @@ export function useLinkcast() {
     voiceMids.current.delete(peerId);
     const connection = peerConnectionsRef.current.get(peerId);
     if (connection) {
+      for (const receiver of connection.getReceivers()) {
+        if (receiver.track.kind === 'video') {
+          receiver.track.onmute = null;
+          receiver.track.onunmute = null;
+          receiver.track.onended = null;
+        }
+      }
       connection.onicecandidate = null;
       connection.oniceconnectionstatechange = null;
       connection.onconnectionstatechange = null;
@@ -323,7 +331,8 @@ export function useLinkcast() {
       };
 
       let recoveryAttempts = 0;
-      const healthy = () => connection.connectionState === 'connected' && channel.readyState === 'open' && isPresenceOpen(remotePeerId);
+      const healthy = () => connection.connectionState === 'connected' && channel.readyState === 'open' && isPresenceOpen(remotePeerId) &&
+        (roleRef.current !== 'viewer' || Boolean(remoteStreamRef.current?.getVideoTracks().some(track => track.readyState === 'live' && !track.muted)));
       const recover = async () => {
         if (roleRef.current === 'viewer') {
           scheduleViewerReconnect(remotePeerId);
@@ -428,12 +437,19 @@ export function useLinkcast() {
             attachVoice(remotePeerId, event.track);
             return;
           }
-          const stream = remoteStreamRef.current || new MediaStream();
-          if (!stream.getTracks().some((track) => track.id === event.track.id)) {
-            stream.addTrack(event.track);
-          }
+          // Publish a new stream when tracks arrive separately. Reusing the same
+          // MediaStream skips React's state update and can leave Safari playing
+          // the audio-only stream it received before the video track.
+          const stream = mergeRemoteStream(remoteStreamRef.current, event.track);
+          if (stream === remoteStreamRef.current || !stream) return;
           remoteStreamRef.current = stream;
-          setRemoteStream(stream);
+          if (event.track.kind === 'video') {
+            event.track.onmute = updateConnectionState;
+            event.track.onunmute = updateConnectionState;
+            event.track.onended = updateConnectionState;
+          }
+          if (stream.getVideoTracks().length) setRemoteStream(stream);
+          updateConnectionState();
         };
       }
 
