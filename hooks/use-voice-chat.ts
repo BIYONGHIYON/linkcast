@@ -331,7 +331,7 @@ export function useVoiceChat() {
       if (token === generation.current) {
         stop();
         setError(reason instanceof Error && reason.message === 'voice_sender_failed'
-          ? '마이크 전송을 연결하지 못했어요. 양쪽 페이지를 새로고침하고 새 방에서 다시 시도해 주세요.'
+          ? '마이크 전송을 연결하지 못했어요. 통화 시작을 다시 눌러 주세요.'
           : '마이크를 연결하지 못했어요. 권한과 장치를 확인해 주세요.');
       }
     } finally {

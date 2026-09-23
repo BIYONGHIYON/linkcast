@@ -12,6 +12,7 @@ import { replaceSenderTrack } from '../lib/rtc-sender';
 import { matchesRemoteIce, rtcConfiguration, updateConnection } from '../lib/rtc-connection';
 import { cancelPeerRecovery, schedulePeerRecovery } from '../lib/peer-recovery';
 import { mergeRemoteStream } from '../lib/remote-stream';
+import { installVoiceTrack } from '../lib/voice-track-install';
 
 type Role = 'host' | 'viewer';
 export type LaserPoint = { x: number; y: number };
@@ -78,7 +79,7 @@ export function useLinkcast() {
   const [meshIdentity, setMeshIdentity] = useState({ selfId: '', hostId: '' });
   const replaceMeshTrack = useVoiceMesh({ ...meshIdentity, participants, track: voiceTrack, attach: attachVoice, remove: removeVoice, send: signalVoice, subscribe: subscribeVoice });
   useEffect(() => subscribeTrack(async next => {
-    const replacements: Promise<void>[] = [];
+    const peers: { sender: RTCRtpSender; isCurrent: () => boolean }[] = [];
     peerConnectionsRef.current.forEach((connection, peerId) => {
       if (connection.signalingState === 'closed') return;
       let transceiver = voiceTransceivers.current.get(peerId);
@@ -90,10 +91,13 @@ export function useLinkcast() {
           if (transceiver.mid) voiceMids.current.set(peerId, transceiver.mid);
         }
       }
-      if (transceiver) replacements.push(replaceSenderTrack(transceiver.sender, next));
+      if (transceiver) peers.push({
+        sender: transceiver.sender,
+        isCurrent: () => peerConnectionsRef.current.get(peerId) === connection && connection.signalingState !== 'closed',
+      });
     });
     // A departing peer must not prevent installing the microphone in the mesh.
-    await Promise.allSettled([...replacements, replaceMeshTrack(next)]);
+    await Promise.all([installVoiceTrack(peers, next), replaceMeshTrack(next)]);
   }), [subscribeTrack, replaceMeshTrack]);
   const transportRef = useRef<SignalingSocket | null>(null);
   const [status, setStatus] = useState<ConnectionStatus>('idle');

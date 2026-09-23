@@ -4,6 +4,7 @@ import { useCallback, useEffect, useRef } from 'react';
 import type { CallParticipant } from './use-call-presence';
 import { matchesRemoteIce, rtcConfiguration, updateConnection } from '../lib/rtc-connection';
 import { replaceSenderTrack } from '../lib/rtc-sender';
+import { installVoiceTrack } from '../lib/voice-track-install';
 
 type Entry = {
   pc: RTCPeerConnection;
@@ -209,6 +210,9 @@ export function useVoiceMesh({ selfId, hostId, participants, track, attach, remo
   }, [selfId, hostId, close]);
 
   return useCallback(async (next: MediaStreamTrack | null) => {
-    await Promise.allSettled([...peers.current.values()].map(entry => replaceSenderTrack(entry.sender, next)));
+    await installVoiceTrack([...peers.current.entries()].map(([id, entry]) => ({
+      sender: entry.sender,
+      isCurrent: () => peers.current.get(id) === entry && entry.pc.signalingState !== 'closed',
+    })), next);
   }, []);
 }

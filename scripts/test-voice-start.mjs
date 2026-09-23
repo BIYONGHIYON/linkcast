@@ -116,15 +116,20 @@ function setup() {
   assert.equal(microphone.stopped, true, 'release microphone after failed sender');
 }
 {
-  const { voice } = setup();
+  const { voice, playback } = setup();
   const sequence = [];
   voice.subscribeTrack(async track => {
     if (track) { sequence.push('join'); return; }
     sequence.push('leave-start');
   });
   await voice.start();
+  const incoming = { kind: 'audio', readyState: 'live', enabled: true };
+  voice.attach('peer', incoming);
   voice.stop();
   await voice.start();
   assert.deepEqual(sequence, ['join', 'join'], 'obsolete leave update cannot replace the new microphone');
+  assert.equal(playback.length, 2, 'rejoining creates one fresh player for the existing remote peer');
+  assert.equal(playback[0].srcObject, null);
+  assert.equal(playback[1].srcObject.tracks[0], incoming);
 }
 console.log('PASS: voice playback, sender cleanup, and ordered leave/rejoin track replacement');

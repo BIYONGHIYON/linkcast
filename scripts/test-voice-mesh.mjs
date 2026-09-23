@@ -6,6 +6,10 @@ import ts from 'typescript';
 
 const source = await readFile(new URL('../hooks/use-voice-mesh.ts', import.meta.url), 'utf8');
 const compiled = ts.transpileModule(source, { compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.CommonJS } }).outputText;
+const installSource = await readFile(new URL('../lib/voice-track-install.ts', import.meta.url), 'utf8');
+const installCompiled = ts.transpileModule(installSource, { compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.CommonJS } }).outputText;
+const voiceInstall = {};
+runInNewContext(installCompiled, { exports: voiceInstall, require: () => ({ replaceSenderTrack: (sender, next) => sender.replaceTrack(next) }) });
 const listeners = new Map();
 const connections = [];
 const A_ID = 'aaaaaaaaaaaaaaaa';
@@ -36,7 +40,7 @@ function client(selfId, visiblePeerIds) {
     useRef: current => ({ current }), useCallback: fn => fn, useEffect: fn => effects.push(fn),
   } : name === '../lib/rtc-connection' ? {
     rtcConfiguration: {}, updateConnection: (_pc, update) => update(), matchesRemoteIce: () => true,
-  } : { replaceSenderTrack: (sender, next) => sender.replaceTrack(next) },
+  } : name === '../lib/voice-track-install' ? voiceInstall : { replaceSenderTrack: (sender, next) => sender.replaceTrack(next) },
   RTCPeerConnection: Peer, window: { setTimeout, clearTimeout }, crypto: webcrypto });
   const received = [];
   const microphone = { kind: 'audio', id: selfId };
@@ -66,6 +70,13 @@ await a.replace(null);
 assert.ok(connections.filter(pc => pc.initialTrack === a.microphone).every(pc => pc.sender.track === null));
 await a.replace(a.microphone);
 assert.ok(connections.filter(pc => pc.initialTrack === a.microphone).every(pc => pc.sender.track === a.microphone));
+const failedPeer = connections.find(pc => pc.initialTrack === a.microphone);
+const replaceTrack = failedPeer.sender.replaceTrack;
+await a.replace(null);
+failedPeer.sender.replaceTrack = async () => { throw new Error('sender_failed'); };
+await assert.rejects(a.replace(a.microphone), /voice_sender_failed/, 'an active silent pair must not look joined');
+failedPeer.sender.replaceTrack = replaceTrack;
+await a.replace(a.microphone);
 a.cleanup(); b.cleanup(); c.cleanup();
 assert.ok(connections.every(pc => pc.closed));
 assert.equal(listeners.size, 0);
