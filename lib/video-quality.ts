@@ -1,6 +1,9 @@
 import { updateSender } from './rtc-sender';
 
-/** Reapply the same source-resolution policy after negotiation and ICE recovery. */
+/** Keep the preview track intact; bound only the outgoing encoder to 1080p. */
+export function broadcastScale(settings: Pick<MediaTrackSettings, 'width' | 'height'>) {
+  return Math.max(1, (settings.width || 1920) / 1920, (settings.height || 1080) / 1080);
+}
 export function configureVideoQuality(sender: RTCRtpSender) {
   return updateSender(sender, async () => {
     if (sender.track?.kind !== 'video' || sender.transport?.state === 'closed') return;
@@ -13,7 +16,7 @@ export function configureVideoQuality(sender: RTCRtpSender) {
         encoding.active = true;
         delete encoding.maxBitrate;
         encoding.maxFramerate = 60;
-        encoding.scaleResolutionDownBy = 1;
+        encoding.scaleResolutionDownBy = broadcastScale(sender.track?.getSettings() || {});
       }
       return parameters;
     };

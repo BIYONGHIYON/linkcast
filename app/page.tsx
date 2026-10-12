@@ -10,6 +10,7 @@ import {
   Minimize2,
   MonitorUp,
   PictureInPicture,
+  MousePointer2,
   Radio,
   RefreshCw,
   Users,
@@ -34,6 +35,8 @@ import { Slider } from '@/components/ui/slider';
 import { useSavedPreference, validDevice, validSensitivity } from '@/hooks/use-saved-preference';
 import { LaserOverlay } from '@/components/laser-overlay';
 import { createRoomLink, normalizeRoomValue } from '@/lib/room-input';
+import { acquireInput } from '@/lib/capture-source';
+import { requestMediaFullscreen } from '@/lib/fullscreen';
 import { VoiceControls } from '@/components/voice-controls';
 
 type DeviceOption = { deviceId: string; label: string };
@@ -111,31 +114,6 @@ async function writeClipboardText(value: string) {
   if (!copied) throw new Error('clipboard_unavailable');
 }
 
-async function requestFullscreenWithFallback(stage: HTMLElement, _video: HTMLVideoElement | null): Promise<'document' | 'viewport' | 'native-video'> {
-  // Keep the video and pointer overlay together, including on mobile Safari.
-  if (typeof stage.requestFullscreen === 'function') {
-    try {
-      await stage.requestFullscreen();
-      return 'document';
-    } catch {
-      // Keep overlays available through a viewport-filling fallback.
-    }
-  }
-
-  // Some mobile browsers reject fullscreen on a nested element but allow the
-  // document root. This also gives the browser a chance to collapse its URL bar.
-  if (typeof document.documentElement.requestFullscreen === 'function') {
-    try {
-      await document.documentElement.requestFullscreen();
-      return 'document';
-    } catch {
-      // The browser may not allow root fullscreen from this browsing context.
-    }
-  }
-
-  // Video-only fullscreen cannot display interactive overlays. Use the stage instead.
-  return 'viewport';
-}
 
 function statusLabel(status: ReturnType<typeof useLinkcast>['status']) {
   switch (status) {
@@ -183,6 +161,10 @@ export default function Home() {
   const [selectedAudio, setSelectedAudio] = useState('');
   useSavedPreference('linkcast.capture.video.v1', selectedDevice, setSelectedDevice, validDevice);
   useSavedPreference('linkcast.capture.audio.v1', selectedAudio, setSelectedAudio, validDevice);
+  const [inputSource, setInputSource] = useState<'capture' | 'screen'>('capture');
+  const [capturePending, setCapturePending] = useState(false);
+  const [hostLaserMode, setHostLaserMode] = useState(false);
+  const [viewerLaserMode, setViewerLaserMode] = useState(false);
   const [captureInfo, setCaptureInfo] = useState<CaptureInfo>({});
   const [isPreviewing, setIsPreviewing] = useState(false);
   const [joinValue, setJoinValue] = useState('');
@@ -233,6 +215,7 @@ export default function Home() {
     remoteStream,
     error: connectionError,
     createRoom,
+    refreshVideoQuality,
     joinRoom,
     leave,
   } = useLinkcast();
@@ -340,6 +323,7 @@ export default function Home() {
     streamRef.current = null;
     if (previewVideoRef.current) previewVideoRef.current.srcObject = null;
     setIsPreviewing(false);
+    setCapturePending(false);
     setHostAudioEnabled(false);
     setHostAspectRatio(null);
     setShowHostControls(true);
@@ -377,54 +361,37 @@ export default function Home() {
     async (videoDeviceId?: string, audioDeviceId?: string) => {
       const operation = ++captureOperationRef.current;
       setCaptureError('');
-      setHostAspectRatio(null);
-      setIsPreviewing(false);
-      await leave();
-      if (operation !== captureOperationRef.current) return;
-      streamRef.current?.getTracks().forEach((track) => { track.onended = null; track.stop(); });
-      streamRef.current = null;
+      setCapturePending(true);
       let acquired: MediaStream | null = null;
-
       try {
-        // resizeMode is supported by capture APIs but absent from this DOM type bundle.
-        const videoConstraints: MediaTrackConstraints & { resizeMode: 'none' } = {
-          width: { ideal: 1920 },
-          height: { ideal: 1080 },
-          frameRate: { ideal: 60, max: 60 },
-          resizeMode: 'none',
-          ...(videoDeviceId ? { deviceId: { exact: videoDeviceId } } : {}),
-        };
-        const stream = await navigator.mediaDevices.getUserMedia({
-          video: videoConstraints,
-          audio: {
-            ...(audioDeviceId ? { deviceId: { exact: audioDeviceId } } : {}),
-            echoCancellation: false,
-            noiseSuppression: false,
-            autoGainControl: false,
-          },
-        });
+        // Open the screen picker before awaiting signaling to retain the click gesture.
+        const acquisition = acquireInput(navigator.mediaDevices, inputSource, videoDeviceId, audioDeviceId);
+        const stream = await acquisition;
         acquired = stream;
         if (operation !== captureOperationRef.current) {
           stream.getTracks().forEach(track => track.stop());
           return;
         }
+        await leave();
+        if (operation !== captureOperationRef.current) return;
+        streamRef.current?.getTracks().forEach(track => { track.onended = null; track.stop(); });
         streamRef.current = stream;
         const videoTrack = stream.getVideoTracks()[0];
         if (!videoTrack) throw new Error('capture_video_missing');
         videoTrack.contentHint = 'detail';
         videoTrack.onended = () => {
-          if (operation !== captureOperationRef.current) return;
+          if (streamRef.current !== stream) return;
           stopPreview();
-          setCaptureError('캡처 장치 연결이 끊겼어요. 장치를 다시 연결해 주세요.');
+          setCaptureError(inputSource === 'screen' ? '화면 공유가 종료되었어요.' : '캡처 장치 연결이 끊겼어요. 장치를 다시 연결해 주세요.');
         };
         const preview = previewVideoRef.current;
         if (preview) {
           preview.srcObject = stream;
-          preview.muted = false;
+          preview.muted = inputSource === 'screen';
           try {
             await preview.play();
             if (operation !== captureOperationRef.current) return;
-            setHostAudioEnabled(true);
+            setHostAudioEnabled(inputSource !== 'screen');
           } catch {
             if (operation !== captureOperationRef.current) return;
             preview.muted = true;
@@ -443,26 +410,34 @@ export default function Home() {
           height: videoSettings?.height,
           frameRate: videoSettings?.frameRate,
         });
-        setSelectedDevice(videoSettings?.deviceId || videoDeviceId || '');
-        setSelectedAudio(audioSettings?.deviceId || audioDeviceId || '');
+        if (inputSource === 'capture') {
+          setSelectedDevice(videoSettings?.deviceId || videoDeviceId || '');
+          setSelectedAudio(audioSettings?.deviceId || audioDeviceId || '');
+        }
         setIsPreviewing(true);
         await refreshDevices().catch(() => undefined);
       } catch (reason) {
         if (operation !== captureOperationRef.current) return;
         if (streamRef.current === acquired) streamRef.current = null;
-        if (previewVideoRef.current?.srcObject === acquired) previewVideoRef.current.srcObject = null;
+        if (previewVideoRef.current?.srcObject === acquired) {
+          previewVideoRef.current.srcObject = null;
+          setIsPreviewing(false); setCaptureInfo({}); setHostAspectRatio(null);
+        }
         const message =
-          reason instanceof DOMException && reason.name === 'NotAllowedError'
+          inputSource === 'screen'
+            ? (reason instanceof Error && reason.message === 'screen_capture_unsupported' ? '이 브라우저는 화면 공유를 지원하지 않아요. 데스크톱 Chrome, Edge 또는 Safari에서 시도해 주세요.' : '화면 공유가 취소되었거나 허용되지 않았어요. 다시 화면을 선택해 주세요.')
+            : reason instanceof DOMException && reason.name === 'NotAllowedError'
             ? '카메라와 오디오 권한을 허용해 주세요.'
             : '캡처보드를 찾지 못했어요. 연결 상태를 확인해 주세요.';
         setCaptureError(message);
       } finally {
+        if (operation === captureOperationRef.current) setCapturePending(false);
         if (acquired && (operation !== captureOperationRef.current || streamRef.current !== acquired)) {
           acquired.getTracks().forEach(track => { track.onended = null; track.stop(); });
         }
       }
     },
-    [leave, refreshDevices, stopPreview],
+    [inputSource, leave, refreshDevices, stopPreview],
   );
 
   const connectViewer = useCallback(
@@ -671,8 +646,9 @@ export default function Home() {
     if (video?.videoWidth && video.videoHeight) {
       setHostAspectRatio(video.videoWidth / video.videoHeight);
       setCaptureInfo(current => ({ ...current, width: video.videoWidth, height: video.videoHeight }));
+      void refreshVideoQuality();
     }
-  }, []);
+  }, [refreshVideoQuality]);
 
   useEffect(() => {
     const video = previewVideoRef.current;
@@ -772,6 +748,8 @@ export default function Home() {
     setIsViewerFullscreen(false);
     if (mode === 'host') stopPreview();
     else void leave();
+    setHostLaserMode(false);
+    setViewerLaserMode(false);
     setMode(nextMode);
     setJoinValue('');
     setShowHostControls(true);
@@ -827,7 +805,7 @@ export default function Home() {
         return;
       }
       setShowHostControls(false);
-      const fullscreenMode = await requestFullscreenWithFallback(stage, video);
+      const fullscreenMode = await requestMediaFullscreen(stage, video, hostLaserMode);
       if (fullscreenMode === 'native-video') {
         nativeHostFullscreenRef.current = true;
         viewportHostFullscreenRef.current = false;
@@ -845,7 +823,28 @@ export default function Home() {
       setIsHostFullscreen(false);
       setShowHostControls(true);
     }
-  }, []);
+  }, [hostLaserMode]);
+
+  const toggleLaserMode = async (role: 'host' | 'viewer') => {
+    const host = role === 'host';
+    const next = !(host ? hostLaserMode : viewerLaserMode);
+    const stage = host ? hostStageRef.current : viewerStageRef.current;
+    const video = host ? previewVideoRef.current : viewerVideoRef.current;
+    const nativeRef = host ? nativeHostFullscreenRef : nativeViewerFullscreenRef;
+    const viewportRef = host ? viewportHostFullscreenRef : viewportViewerFullscreenRef;
+    const fullscreen = host ? isHostFullscreen : isViewerFullscreen;
+    (host ? setHostLaserMode : setViewerLaserMode)(next);
+    if (!fullscreen || !stage) return;
+    if (nativeRef.current) (video as WebkitFullscreenVideo | null)?.webkitExitFullscreen?.();
+    nativeRef.current = false;
+    viewportRef.current = false;
+    if (document.fullscreenElement) await document.exitFullscreen().catch(() => undefined);
+    const result = await requestMediaFullscreen(stage, video, next);
+    nativeRef.current = result === 'native-video';
+    viewportRef.current = result === 'viewport';
+    (host ? setIsHostFullscreen : setIsViewerFullscreen)(true);
+    (host ? setShowHostControls : setShowViewerControls)(true);
+  };
 
   const revealHostControls = useCallback(() => {
     setShowHostControls(true);
@@ -884,7 +883,7 @@ export default function Home() {
         return;
       }
       setShowViewerControls(false);
-      const fullscreenMode = await requestFullscreenWithFallback(stage, video);
+      const fullscreenMode = await requestMediaFullscreen(stage, video, viewerLaserMode);
       if (fullscreenMode === 'native-video') {
         nativeViewerFullscreenRef.current = true;
         viewportViewerFullscreenRef.current = false;
@@ -902,7 +901,7 @@ export default function Home() {
       setIsViewerFullscreen(false);
       setShowViewerControls(true);
     }
-  }, []);
+  }, [viewerLaserMode]);
 
   const revealViewerControls = useCallback(() => {
     setShowViewerControls(true);
@@ -1004,11 +1003,11 @@ export default function Home() {
         {
           name: 'create_linkcast_room',
           title: '송출 링크 만들기',
-          description: '연결된 캡처보드로 실제 P2P 송출 방과 공유 링크를 만듭니다.',
+          description: '선택한 캡처보드 또는 공유 화면으로 실제 P2P 송출 방과 공유 링크를 만듭니다.',
           inputSchema: { type: 'object', properties: {}, additionalProperties: false },
           annotations: { readOnlyHint: false, untrustedContentHint: false },
           execute: async () => {
-            if (!streamRef.current) throw new Error('캡처보드를 먼저 연결해 주세요.');
+            if (!streamRef.current) throw new Error('영상 입력을 먼저 연결해 주세요.');
             const createdRoomId = await createShareLink();
             if (!createdRoomId) throw new Error('방을 만들지 못했어요.');
             return {
@@ -1051,10 +1050,10 @@ export default function Home() {
   const resolution =
     captureInfo.width && captureInfo.height
       ? `${captureInfo.width} × ${captureInfo.height}`
-      : '1920 × 1080';
+      : '입력 대기';
   const frameRate = captureInfo.frameRate
     ? `${Math.round(captureInfo.frameRate)} fps`
-    : '60 fps';
+    : '입력 대기';
   const activeRoom = Boolean(roomId && status !== 'idle');
 
   return (
@@ -1086,7 +1085,7 @@ export default function Home() {
 
           <TabsContent value="host">
             <div className="grid gap-5 lg:grid-cols-[minmax(0,1fr)_340px]">
-              <section ref={hostStageRef} style={!isHostFullscreen && hostAspectRatio ? { aspectRatio: hostAspectRatio } : undefined} className={`group overflow-hidden bg-[#0b0d0f] shadow-[0_24px_80px_rgba(8,11,14,0.16)] ${isHostFullscreen ? 'fixed inset-0 z-50 h-dvh w-screen rounded-none' : 'relative aspect-video min-h-0 rounded-2xl sm:min-h-[280px] sm:rounded-[28px]'}`}>
+              <section ref={hostStageRef} style={!isHostFullscreen && hostAspectRatio ? { aspectRatio: hostAspectRatio } : undefined} className={`group overflow-hidden bg-[#0b0d0f] shadow-[0_24px_80px_rgba(8,11,14,0.16)] ${isHostFullscreen ? 'fixed inset-0 z-50 h-dvh w-screen rounded-none' : `relative ${isPreviewing ? 'aspect-video min-h-0' : 'h-[280px] sm:aspect-video sm:h-auto'} rounded-2xl sm:min-h-[280px] sm:rounded-[28px]`}`}>
                 <video ref={previewVideoRef} muted={!hostAudioEnabled} playsInline onLoadedMetadata={updateHostAspectRatio} className={`block h-full w-full object-contain transition-opacity duration-300 ${isPreviewing ? 'opacity-100' : 'opacity-0'}`}>
                   <track kind="captions" srcLang="ko" label="한국어" src="/captions-empty.vtt" />
                 </video>
@@ -1095,16 +1094,16 @@ export default function Home() {
                   <div className="absolute inset-0 grid place-items-center px-6 text-center">
                     <div>
                       <span className="mx-auto mb-5 grid size-14 place-items-center rounded-full border border-white/10 bg-white/[0.06] text-white"><Video className="size-5" /></span>
-                      <h2 className="text-xl font-medium tracking-[-0.025em] text-white">캡처보드를 연결하세요</h2>
-                      <p className="mt-2 text-sm text-white/45">1080p 60fps로 입력을 요청합니다</p>
-                      <Button size="lg" onClick={() => void startPreview(selectedDevice, selectedAudio)} className="mt-6 h-11 rounded-full bg-white px-5 text-[#0b0d0f] hover:bg-white/90">
-                        <MonitorUp data-icon="inline-start" /> 캡처보드 연결
+                      <h2 className="text-xl font-medium tracking-[-0.025em] text-white">{inputSource === 'screen' ? '공유할 화면을 선택하세요' : '캡처보드를 연결하세요'}</h2>
+                      <p className="mt-2 text-sm text-white/45">최대 4K 미리보기 · 1080p 60fps 송출</p>
+                      <Button size="lg" disabled={capturePending} onClick={() => void startPreview(selectedDevice, selectedAudio)} className="mt-6 h-11 rounded-full bg-white px-5 text-[#0b0d0f] hover:bg-white/90">
+                        <MonitorUp data-icon="inline-start" /> {capturePending ? '입력 연결 중' : inputSource === 'screen' ? '화면 선택' : '캡처보드 연결'}
                       </Button>
                     </div>
                   </div>
                 )}
 
-                {isPreviewing && <LaserOverlay ratio={hostAspectRatio || 16 / 9} strokes={laserStrokes} onSend={sendLaserStroke} />}
+                {isPreviewing && (!isHostFullscreen || hostLaserMode) && <LaserOverlay interactive={hostLaserMode} ratio={hostAspectRatio || 16 / 9} strokes={laserStrokes} onSend={sendLaserStroke} />}
                 {activeRoom && isHostFullscreen && showHostControls && <div className="absolute inset-x-3 bottom-20 z-20 mx-auto max-h-[60dvh] max-w-2xl overflow-y-auto"><VoiceControls voice={voice} host /></div>}
                 {isHostFullscreen && <button type="button" aria-label="영상 메뉴 열기" onClick={revealHostControls} className="absolute bottom-2 right-4 z-10 h-11 w-11 rounded-full bg-black/35 text-xl text-white">···</button>}
                 {(!isHostFullscreen || showHostControls) && (
@@ -1118,6 +1117,7 @@ export default function Home() {
                           <span className="hidden rounded-full border border-white/10 bg-black/35 px-3 py-1.5 text-xs font-medium text-white/80 backdrop-blur-md sm:inline-flex">
                             {resolution} · {frameRate}
                           </span>
+                          <Button variant="ghost" size="icon" onClick={() => void toggleLaserMode('host')} title={hostLaserMode ? '레이저 모드 종료' : '레이저 모드 켜기'} aria-label={hostLaserMode ? '레이저 모드 종료' : '레이저 모드 켜기'} aria-pressed={hostLaserMode} className="rounded-full border border-white/10 bg-black/35 text-white/80 hover:bg-black/55 hover:text-white"><MousePointer2 /></Button>
                           <Button variant="ghost" size="icon" onClick={() => void toggleHostAudio()} aria-label={hostAudioEnabled ? '송출자 소리 끄기' : '송출자 소리 켜기'} className="rounded-full border border-white/10 bg-black/35 text-white/80 hover:bg-black/55 hover:text-white">
                             {hostAudioEnabled ? <Volume2 /> : <VolumeX />}
                           </Button>
@@ -1135,18 +1135,28 @@ export default function Home() {
                 <div className="flex items-center justify-between">
                   <div>
                     <p className="text-sm text-muted-foreground">영상 입력</p>
-                    <h2 className="mt-1 text-lg font-semibold tracking-[-0.025em]">캡처 설정</h2>
+                    <h2 className="mt-1 text-lg font-semibold tracking-[-0.025em]">입력 설정</h2>
                   </div>
                   <Button variant="ghost" size="icon" aria-label="입력 장치 새로고침" onClick={() => void refreshDevices()} className="rounded-full"><RefreshCw /></Button>
                 </div>
 
                 <div className="mt-7 space-y-5">
                   <div className="space-y-2">
+                    <Label htmlFor="input-source">입력 소스</Label>
+                    <Select value={inputSource} disabled={activeRoom || capturePending} onValueChange={value => { stopPreview(); setInputSource(value as 'capture' | 'screen'); setCaptureError(''); }}>
+                      <SelectTrigger id="input-source" className="h-11 w-full rounded-xl px-3"><SelectValue>{inputSource === 'screen' ? '화면 공유' : 'USB 캡처보드'}</SelectValue></SelectTrigger>
+                      <SelectContent><SelectItem value="capture">USB 캡처보드</SelectItem><SelectItem value="screen">화면 공유</SelectItem></SelectContent>
+                    </Select>
+                  </div>
+                  {inputSource === 'screen' && <div className="space-y-3"><p className="text-sm leading-6 text-muted-foreground">화면 선택에서 프로그램 창, 전체 화면 또는 브라우저 탭을 골라 주세요. 소리는 브라우저와 선택한 화면의 지원 여부에 따라 공유됩니다. 같은 컴퓨터의 화면을 공유할 때는 미리보기 소리를 꺼 두세요.</p><Button disabled={activeRoom || capturePending} onClick={() => void startPreview()} className="w-full rounded-xl"><MonitorUp />{capturePending ? '입력 연결 중' : isPreviewing ? '공유 화면 다시 선택' : '화면 선택'}</Button></div>}
+                  {inputSource === 'capture' && <>
+
+                  <div className="space-y-2">
                     <Label htmlFor="video-device">영상 장치</Label>
                     <Select value={selectedDevice} onValueChange={(value) => {
                       setSelectedDevice(value as string);
                       if (isPreviewing) void startPreview(value as string, selectedAudio);
-                    }} disabled={activeRoom}>
+                    }} disabled={activeRoom || capturePending}>
                       <SelectTrigger id="video-device" className="h-11 w-full rounded-xl px-3"><SelectValue placeholder="캡처보드를 선택하세요">{videoDevices.find(d => d.deviceId === selectedDevice)?.label || '캡처보드를 선택하세요'}</SelectValue></SelectTrigger>
                       <SelectContent>
                         {videoDevices.length ? videoDevices.map((device) => <SelectItem key={device.deviceId} value={device.deviceId}>{device.label}</SelectItem>) : <SelectItem value="none" disabled>연결된 장치 없음</SelectItem>}
@@ -1159,7 +1169,7 @@ export default function Home() {
                     <Select value={selectedAudio} onValueChange={(value) => {
                       setSelectedAudio(value as string);
                       if (isPreviewing) void startPreview(selectedDevice, value as string);
-                    }} disabled={activeRoom}>
+                    }} disabled={activeRoom || capturePending}>
                       <SelectTrigger id="audio-device" className="h-11 w-full rounded-xl px-3"><Volume2 className="size-4 text-muted-foreground" /><SelectValue placeholder="오디오 입력을 선택하세요">{audioDevices.find(d => d.deviceId === selectedAudio)?.label || '오디오 입력을 선택하세요'}</SelectValue></SelectTrigger>
                       <SelectContent>
                         {audioDevices.length ? audioDevices.map((device) => <SelectItem key={device.deviceId} value={device.deviceId}>{device.label}</SelectItem>) : <SelectItem value="none" disabled>연결된 장치 없음</SelectItem>}
@@ -1167,9 +1177,12 @@ export default function Home() {
                     </Select>
                   </div>
 
+                  </>}
+                  <p className="text-xs text-muted-foreground">송출 최대 1920 × 1080 · 60fps</p>
+
                   <div className="grid grid-cols-2 gap-3">
-                    <div className="rounded-2xl bg-muted/65 p-4"><p className="text-xs text-muted-foreground">해상도</p><p className="mt-1 text-sm font-medium">{resolution}</p></div>
-                    <div className="rounded-2xl bg-muted/65 p-4"><p className="text-xs text-muted-foreground">프레임</p><p className="mt-1 text-sm font-medium">{frameRate}</p></div>
+                    <div className="rounded-2xl bg-muted/65 p-4"><p className="text-xs text-muted-foreground">미리보기 해상도</p><p className="mt-1 text-sm font-medium">{resolution}</p></div>
+                    <div className="rounded-2xl bg-muted/65 p-4"><p className="text-xs text-muted-foreground">입력 프레임</p><p className="mt-1 text-sm font-medium">{frameRate}</p></div>
                   </div>
                 </div>
 
@@ -1177,7 +1190,7 @@ export default function Home() {
 
                 <div className="mt-6 border-t border-border pt-6 lg:mt-auto">
                   {!shareUrl ? (
-                    <Button size="lg" disabled={!isPreviewing || status === 'creating'} onClick={() => void createShareLink()} className="h-12 w-full rounded-full text-base">
+                    <Button size="lg" disabled={!isPreviewing || capturePending || status === 'creating'} onClick={() => void createShareLink()} className="h-12 w-full rounded-full text-base">
                       <Link2 data-icon="inline-start" /> {status === 'creating' ? '방 만드는 중' : '링크 만들고 복사'}
                     </Button>
                   ) : (
@@ -1226,13 +1239,14 @@ export default function Home() {
                     </div>
                   </div>
                 )}
-                {remoteStream && viewerVideoReady && <LaserOverlay ratio={viewerAspectRatio || 16 / 9} strokes={laserStrokes} onSend={sendLaserStroke} />}
+                {remoteStream && viewerVideoReady && (!isViewerFullscreen || viewerLaserMode) && <LaserOverlay interactive={viewerLaserMode} ratio={viewerAspectRatio || 16 / 9} strokes={laserStrokes} onSend={sendLaserStroke} />}
                 {isViewerFullscreen && showViewerControls && <div className="absolute inset-x-3 bottom-20 z-20 mx-auto max-h-[60dvh] max-w-2xl overflow-y-auto"><VoiceControls voice={voice} host={false} /></div>}
                 {isViewerFullscreen && <button type="button" aria-label="영상 메뉴 열기" onClick={revealViewerControls} className="absolute bottom-2 right-4 z-10 h-11 w-11 rounded-full bg-black/35 text-xl text-white">···</button>}
                 {(!isViewerFullscreen || showViewerControls) && (
                   <div className="absolute inset-x-0 top-0 flex items-center justify-between gap-2 p-2 sm:p-5">
                     <span className="rounded-full border border-white/10 bg-black/35 px-3 py-1.5 text-xs font-medium text-white/80 backdrop-blur-md">{status === 'connected' ? 'LIVE' : 'CONNECTING'}</span>
                     <div className="flex shrink-0 items-center gap-1.5 sm:gap-2">
+                      {remoteStream && <Button variant="ghost" size="icon" onClick={() => void toggleLaserMode('viewer')} title={viewerLaserMode ? '레이저 모드 종료' : '레이저 모드 켜기'} aria-label={viewerLaserMode ? '레이저 모드 종료' : '레이저 모드 켜기'} aria-pressed={viewerLaserMode} className="size-9 shrink-0 rounded-full border border-white/10 bg-black/35 text-white/80 hover:bg-black/55 hover:text-white"><MousePointer2 /></Button>}
                       {remoteStream && viewerPipSupported && (
                         <Button
                           variant="ghost"

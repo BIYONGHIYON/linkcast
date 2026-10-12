@@ -6,7 +6,7 @@ import { useVoiceChat } from './use-voice-chat';
 import { useCallPresence } from './use-call-presence';
 import { useLaserStrokes } from './use-laser-strokes';
 import { useVoiceMesh } from './use-voice-mesh';
-import { configureVideoQuality } from '../lib/video-quality';
+import { broadcastScale, configureVideoQuality } from '../lib/video-quality';
 import { queueDataChannel, type DataChannelTransport } from '../lib/data-channel';
 import { replaceSenderTrack } from '../lib/rtc-sender';
 import { matchesRemoteIce, rtcConfiguration, updateConnection } from '../lib/rtc-connection';
@@ -414,7 +414,7 @@ export function useLinkcast() {
       if (roleRef.current === 'host') {
         for (const track of localStreamRef.current?.getTracks() || []) {
           if (track.kind === 'video') track.contentHint = 'detail';
-          const sender = connection.addTransceiver(track, { direction: 'sendonly', streams: [localStreamRef.current!] }).sender;
+          const sender = connection.addTransceiver(track, { direction: 'sendonly', streams: [localStreamRef.current!], ...(track.kind === 'video' ? { sendEncodings: [{ maxFramerate: 60, scaleResolutionDownBy: broadcastScale(track.getSettings()) }] } : {}) }).sender;
           if (track.kind === 'video') void configureVideoQuality(sender).catch(() => undefined);
         }
         const transceiver = connection.addTransceiver(voiceTrack.current || 'audio', { direction: 'sendrecv' });
@@ -719,6 +719,12 @@ export function useLinkcast() {
     }
   }, [api, stopLoops, stopVoice, removeVoice, clearPresence, clearLaserStrokes]);
 
+  const refreshVideoQuality = useCallback(() => {
+    const senders = [...peerConnectionsRef.current.values()].flatMap(connection =>
+      connection.getSenders().filter(sender => sender.track?.kind === 'video'));
+    return Promise.allSettled(senders.map(configureVideoQuality));
+  }, []);
+
   const createRoom = useCallback(
     async (stream: MediaStream, requestedRoomId?: string) => {
       const leaving = leave();
@@ -841,6 +847,7 @@ export function useLinkcast() {
     remoteStream,
     error,
     createRoom,
+    refreshVideoQuality,
     joinRoom,
     leave,
   };

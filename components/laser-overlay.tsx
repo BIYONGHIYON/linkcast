@@ -14,7 +14,7 @@ function FadingStroke({ stroke, children }: { stroke: VisibleLaserStroke; childr
   return <g ref={element} pointerEvents="none">{children}</g>;
 }
 
-export function LaserOverlay({ ratio, strokes, onSend }: { ratio: number; strokes: VisibleLaserStroke[]; onSend: (points: LaserPoint[]) => void }) {
+export function LaserOverlay({ ratio, strokes, onSend, interactive = true }: { interactive?: boolean; ratio: number; strokes: VisibleLaserStroke[]; onSend: (points: LaserPoint[]) => void }) {
   const root = useRef<HTMLDivElement>(null);
   const active = useRef<{ pointerId: number; points: LaserPoint[] } | null>(null);
   const releaseListeners = useRef<(() => void) | null>(null);
@@ -77,10 +77,10 @@ export function LaserOverlay({ ratio, strokes, onSend }: { ratio: number; stroke
     </g>;
   };
   return <div ref={root} className="pointer-events-none absolute inset-0 flex items-center justify-center">
-    <svg aria-label="누른 채 그린 후 손을 떼면 포인터 공유" className="pointer-events-auto touch-none select-none" style={{ width: size.width, height: size.height, touchAction: 'none', userSelect: 'none' }} viewBox={`0 0 ${size.width} ${size.height}`} 
+    <svg aria-label="누른 채 그린 후 손을 떼면 포인터 공유" className={interactive ? "pointer-events-auto touch-none select-none" : "pointer-events-none"} style={{ width: size.width, height: size.height, touchAction: interactive ? 'none' : 'auto', userSelect: 'none' }} viewBox={`0 0 ${size.width} ${size.height}`}
       onContextMenu={event => event.preventDefault()}
       onPointerDown={event => {
-        if (active.current || (event.pointerType === 'mouse' && event.button !== 0)) return;
+        if (!interactive || active.current || (event.pointerType === 'mouse' && event.button !== 0)) return;
         event.preventDefault();
         const element = event.currentTarget;
         const pointerId = event.pointerId;
