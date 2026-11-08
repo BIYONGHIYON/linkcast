@@ -3,16 +3,16 @@ export type NativeFullscreenVideo = HTMLVideoElement & {
   webkitExitFullscreen?: () => void;
 };
 
-/** Native video fullscreen on iPhone; stage fullscreen for drawing controls. */
+/** Keep the stage for overlays; native video fullscreen cannot show received strokes. */
 export async function requestMediaFullscreen(
   stage: HTMLElement,
   video: HTMLVideoElement | null,
-  laserMode = false,
+  preserveOverlay = false,
 ): Promise<'document' | 'viewport' | 'native-video'> {
   if (typeof stage.requestFullscreen === 'function') {
     try { await stage.requestFullscreen(); return 'document'; } catch { /* Try video next. */ }
   }
-  if (!laserMode && video) {
+  if (!preserveOverlay && video) {
     const native = video as NativeFullscreenVideo;
     if (typeof native.webkitEnterFullscreen === 'function') {
       try { native.webkitEnterFullscreen(); return 'native-video'; } catch { /* Try standard API. */ }

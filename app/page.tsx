@@ -805,7 +805,7 @@ export default function Home() {
         return;
       }
       setShowHostControls(false);
-      const fullscreenMode = await requestMediaFullscreen(stage, video, hostLaserMode);
+      const fullscreenMode = await requestMediaFullscreen(stage, video, true);
       if (fullscreenMode === 'native-video') {
         nativeHostFullscreenRef.current = true;
         viewportHostFullscreenRef.current = false;
@@ -823,7 +823,7 @@ export default function Home() {
       setIsHostFullscreen(false);
       setShowHostControls(true);
     }
-  }, [hostLaserMode]);
+  }, []);
 
   const toggleLaserMode = async (role: 'host' | 'viewer') => {
     const host = role === 'host';
@@ -834,7 +834,8 @@ export default function Home() {
     const viewportRef = host ? viewportHostFullscreenRef : viewportViewerFullscreenRef;
     const fullscreen = host ? isHostFullscreen : isViewerFullscreen;
     (host ? setHostLaserMode : setViewerLaserMode)(next);
-    if (!fullscreen || !stage) return;
+    // Host fullscreen already contains the overlay; changing input needs no transition.
+    if (host || !fullscreen || !stage) return;
     if (nativeRef.current) (video as WebkitFullscreenVideo | null)?.webkitExitFullscreen?.();
     nativeRef.current = false;
     viewportRef.current = false;
@@ -1103,7 +1104,8 @@ export default function Home() {
                   </div>
                 )}
 
-                {isPreviewing && (!isHostFullscreen || hostLaserMode) && <LaserOverlay interactive={hostLaserMode} ratio={hostAspectRatio || 16 / 9} strokes={laserStrokes} onSend={sendLaserStroke} />}
+                {/* Received strokes stay visible even when the host is not drawing. */}
+                {isPreviewing && <LaserOverlay interactive={hostLaserMode} ratio={hostAspectRatio || 16 / 9} strokes={laserStrokes} onSend={sendLaserStroke} />}
                 {activeRoom && isHostFullscreen && showHostControls && <div className="absolute inset-x-3 bottom-20 z-20 mx-auto max-h-[60dvh] max-w-2xl overflow-y-auto"><VoiceControls voice={voice} host /></div>}
                 {isHostFullscreen && <button type="button" aria-label="영상 메뉴 열기" onClick={revealHostControls} className="absolute bottom-2 right-4 z-10 h-11 w-11 rounded-full bg-black/35 text-xl text-white">···</button>}
                 {(!isHostFullscreen || showHostControls) && (

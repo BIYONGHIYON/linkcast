@@ -79,3 +79,19 @@ for (const duration of [0, 1, 5, 10, 16]) {
   }
 }
 console.log('PASS: rapid 0-16ms long mouse drags with/without move or render; short drags, capture failure and duplicate endings');
+
+// Passive viewing must still render received strokes without capturing gestures.
+const passiveSent = [];
+const passive = compiledModule.exports.LaserOverlay({
+  ratio: 16 / 9, interactive: false,
+  strokes: [{ id: 'remote', points: [{ x: 0.25, y: 0.5 }], shownAt: Date.now() }],
+  onSend: points => passiveSent.push(points),
+}).props.children.props;
+assert.equal(passive.className, 'pointer-events-none');
+assert.equal(passive.children[1].length, 1, 'remote stroke renders with drawing disabled');
+assert.equal(passive.children[1][0].props.children.props.children.length, 2, 'both stroke outlines remain visible');
+passive.onPointerDown(event(20));
+passive.onPointerUp(event(140));
+assert.equal(passiveSent.length, 0);
+assert.equal(listeners.size, 0);
+console.log('PASS: passive overlay displays remote strokes and never starts or sends gestures');
