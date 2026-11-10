@@ -7,178 +7,146 @@
 <meta name="description" content="USB 캡처보드나 화면 공유로 입력한 콘솔·PC 화면을 링크 하나로 최대 5명에게 보내는 실시간 P2P 방송 서비스. WebRTC 1080p 60fps 송출, 음성 통화, 레이저 포인터.">
 <link rel="icon" href="assets/icon.svg" type="image/svg+xml">
 <link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/orioncactus/pretendard@v1.3.9/dist/web/variable/pretendardvariable-dynamic-subset.min.css">
-<link rel="stylesheet" href="style.css">
+<link rel="stylesheet" href="style.css?v=2">
 <style>
-  :root { --accent: #6a3fd9; --accent-dark: #a98bff; }
-  @media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) { --on-accent: #1a0c3d; } }
-  :root[data-theme="dark"] { --on-accent: #1a0c3d; }
-  .screen { position: relative; aspect-ratio: 16 / 10; border-radius: var(--radius); border: 1px solid var(--line); box-shadow: var(--shadow); overflow: hidden;
-    background: radial-gradient(120% 90% at 20% 10%, color-mix(in srgb, var(--accent) 35%, #10121a), #0b0c12 70%); color: #e9e7f5; }
-  .screen .bar { display: flex; align-items: center; gap: 8px; padding: 12px 14px; font-size: 12px; background: rgba(255,255,255,.06); border-bottom: 1px solid rgba(255,255,255,.08); }
-  .screen .live { padding: 2px 8px; border-radius: 6px; background: #e5484d; color: #fff; font-weight: 800; letter-spacing: .04em; }
-  .screen .code { margin-left: auto; font-family: "JetBrains Mono", ui-monospace, monospace; opacity: .8; }
-  .screen .stage { position: absolute; inset: 44px 14px 54px; border-radius: 10px; background: linear-gradient(135deg, #1d2140, #2b1f4d 55%, #3b2a2a); display: grid; place-items: center; font-size: 13px; color: rgba(255,255,255,.55); }
-  .screen .laser { position: absolute; width: 14px; height: 14px; border-radius: 50%; background: #ff3b5c; box-shadow: 0 0 0 6px rgba(255,59,92,.25), 0 0 18px #ff3b5c; }
-  .screen .people { position: absolute; left: 14px; right: 14px; bottom: 12px; display: flex; gap: 6px; align-items: center; font-size: 12px; }
-  .screen .people span { width: 26px; height: 26px; border-radius: 50%; display: grid; place-items: center; font-weight: 800; font-size: 11px; background: rgba(255,255,255,.14); }
-  .screen .people span.talk { box-shadow: 0 0 0 2px #46d39a; }
-  .screen .people em { margin-left: auto; font-style: normal; opacity: .75; }
-  .diagram { background: var(--bg-2); border: 1px solid var(--line); border-radius: var(--radius); padding: 20px; }
+  :root { --accent: #4f4594; --accent-dark: #b4abe8; }
+  .diagram { border: 1px solid var(--line); border-radius: 6px; background: var(--surface); padding: 16px; }
   .diagram svg { display: block; width: 100%; height: auto; }
   .diagram text { font-family: inherit; fill: var(--fg); font-size: 14px; }
-  .diagram .sub { fill: var(--fg-2); font-size: 12px; }
+  .diagram .sub { fill: var(--fg-3); font-size: 12px; }
   .diagram .box { fill: var(--bg); stroke: var(--line); stroke-width: 1.5; }
-  .diagram .host { fill: color-mix(in srgb, var(--accent) 12%, var(--bg)); stroke: var(--accent); }
-  .diagram .media { stroke: var(--accent); stroke-width: 2.5; fill: none; }
-  .diagram .voice { stroke: #1f9d6b; stroke-width: 1.5; stroke-dasharray: 5 4; fill: none; }
-  .diagram .signal { stroke: var(--fg-2); stroke-width: 1.2; stroke-dasharray: 2 4; fill: none; }
-  .legend { display: flex; flex-wrap: wrap; gap: 18px; margin-top: 14px; font-size: 13px; color: var(--fg-2); }
-  .legend i { display: inline-block; width: 22px; height: 0; vertical-align: middle; margin-right: 6px; border-top: 3px solid var(--accent); }
-  .legend i.v { border-top: 2px dashed #1f9d6b; }
-  .legend i.s { border-top: 2px dotted var(--fg-2); }
-  .roles { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
-  .roles .card h3 { margin-bottom: 16px; }
-  @media (max-width: 760px) { .roles { grid-template-columns: 1fr; } }
+  .diagram .host { stroke: var(--accent); }
+  .diagram .media { stroke: var(--accent); stroke-width: 2.2; fill: none; }
+  .diagram .voice { stroke: var(--fg-2); stroke-width: 1.3; stroke-dasharray: 5 4; fill: none; }
+  .diagram .signal { stroke: var(--fg-3); stroke-width: 1.1; stroke-dasharray: 2 4; fill: none; }
+  .legend { display: flex; flex-wrap: wrap; gap: 16px; margin-top: 12px; font-size: 13px; color: var(--fg-3); }
+  .legend i { display: inline-block; width: 22px; vertical-align: middle; margin-right: 6px; border-top: 2px solid var(--accent); }
+  .legend i.v { border-top: 2px dashed var(--fg-2); }
+  .legend i.s { border-top: 2px dotted var(--fg-3); }
+  .roles { display: grid; grid-template-columns: 1fr 1fr; gap: 36px; margin-top: 32px; }
+  .roles h3 { margin: 0 0 14px !important; }
+  @media (max-width: 640px) { .roles { grid-template-columns: 1fr; gap: 20px; } }
 </style>
 </head>
 <body>
-<header class="site-header">
-  <a class="brand" href="#top"><img src="assets/icon.svg" alt="" width="30" height="30"><span>Linkcast</span></a>
+<header class="site-header"><div class="shell">
+  <a class="brand" href="#top"><img src="assets/icon.svg" alt="" width="26" height="26"><span>Linkcast</span></a>
   <nav aria-label="페이지 목차">
-    <a href="#about">서비스 소개</a>
     <a href="#how">사용 방법</a>
     <a href="#features">기능</a>
     <a href="#architecture">연결 구조</a>
   </nav>
   <a class="back" href="https://biyonghiyon.github.io/portfolio/">← 포트폴리오</a>
-</header>
+</div></header>
 
-<main id="top">
-  <section class="hero shell">
-    <div>
-      <p class="eyebrow">Real-time P2P Screen Sharing</p>
-      <h1>콘솔 화면을<br><em>링크 하나로</em> 함께 봅니다</h1>
-      <p class="lead">USB 캡처보드나 화면 공유로 입력한 콘솔·PC 화면을 최대 5명에게 보내는 소규모 실시간 방송 서비스입니다. 설치 없이 브라우저에서 보고, 음성으로 대화하고, 화면을 가리키며 이야기합니다.</p>
-      <div class="actions">
-        <a class="btn primary" href="https://linkcast.byeonghyeon383.workers.dev/">서비스 열기 ↗</a>
-        <a class="btn" href="https://github.com/BIYONGHIYON/linkcast">GitHub ↗</a>
-      </div>
-      <dl class="facts">
-        <div><dt>역할</dt><dd>개인 프로젝트</dd></div>
-        <div><dt>기간</dt><dd>2026.09 — 10</dd></div>
-        <div><dt>최대 송출</dt><dd>1080p · 60fps</dd></div>
-      </dl>
+<main id="top" class="shell">
+  <section class="hero">
+    <p class="hero-meta">웹 서비스 · 실시간 P2P 화면 공유 · 2026.09 — 2026.10</p>
+    <h1>콘솔·PC 화면을 링크 하나로 최대 5명과 함께 봅니다</h1>
+    <p class="lead">USB 캡처보드나 화면 공유로 입력한 화면을 브라우저에서 바로 송출하는 소규모 실시간 방송 서비스입니다. 참가자는 설치 없이 링크를 열어 보고, 모두가 음성으로 대화하며 화면을 가리킬 수 있습니다.</p>
+    <div class="actions">
+      <a class="btn primary" href="https://linkcast.byeonghyeon383.workers.dev/">서비스 열기</a>
+      <a class="btn" href="https://github.com/BIYONGHIYON/linkcast">GitHub</a>
     </div>
-    <figure class="hero-media" aria-hidden="true">
-      <div class="screen">
-        <div class="bar"><span class="live">LIVE</span><span>캡처보드 · 1920×1080 · 60fps</span><span class="code">참가 코드</span></div>
-        <div class="stage">송출 중인 콘솔 화면</div>
-        <span class="laser" style="left:74%;top:30%"></span>
-        <div class="people"><span class="talk">H</span><span class="talk">1</span><span>2</span><span>3</span><span>4</span><span>5</span><em>참가자 5 / 5 · 통화 중</em></div>
-      </div>
-      <figcaption>송출자 1명과 참가자 최대 5명이 한 화면을 보며 통화하고, 레이저 포인터로 위치를 가리킵니다. (구성 예시)</figcaption>
+    <dl class="facts">
+      <div><dt>역할</dt><dd>개인 프로젝트</dd></div>
+      <div><dt>최대 송출</dt><dd>1080p · 60fps</dd></div>
+      <div><dt>참가 인원</dt><dd>송출자 + 최대 5명</dd></div>
+    </dl>
+    <figure class="hero-media">
+      <img src="assets/host.jpg" alt="Linkcast 송출자 화면: 왼쪽에 송출 중인 게임 화면과 ON AIR 표시, 오른쪽에 입력 설정·공유 링크·참가 코드·연결 인원 1/5명" width="1600" height="1011">
+      <figcaption>실제 서비스의 송출자 화면. 참가자 한 명이 연결된 상태로, 오른쪽에 공유 링크와 참가 코드, 연결 인원이 표시됩니다. 입력으로는 데모 영상(NODE 게임 화면)을 사용했습니다.</figcaption>
     </figure>
   </section>
 
-  <section class="section shell" id="about">
-    <div class="section-head">
-      <div><span class="num mono">01 · 서비스 소개</span><h2>몇 명에게 보여 줄 화면이라면<br>링크 하나면 충분합니다</h2></div>
-      <p>친구 몇 명에게 게임 화면을 보여 주고 싶을 때, 설치 없이 브라우저에서 링크만 열면 되는 가벼운 방송을 목표로 만들었습니다.</p>
-    </div>
-    <div class="cards">
-      <article class="card"><span class="k">INPUT</span><h3>캡처보드 또는 화면 공유</h3><p>USB 캡처보드의 영상·오디오 장치, 또는 프로그램 창·전체 화면·브라우저 탭을 입력으로 선택합니다.</p></article>
-      <article class="card"><span class="k">SHARE</span><h3>링크와 참가 코드</h3><p>미리보기를 확인한 뒤 링크를 만들어 복사합니다. 참가자는 링크를 열거나 코드를 입력해 들어옵니다.</p></article>
-      <article class="card"><span class="k">TALK</span><h3>모두가 함께 대화</h3><p>송출자와 참가자, 참가자끼리도 음성으로 연결됩니다. 각자 통화 시작을 눌러 마이크를 켭니다.</p></article>
-    </div>
-  </section>
-
-  <section class="section shell" id="how">
-    <div class="section-head">
-      <div><span class="num mono">02 · 사용 방법</span><h2>보내는 사람도, 보는 사람도<br>세 단계면 충분합니다</h2></div>
-      <p>송출 중에는 입력 변경을 잠그고, 입력을 바꾸려면 송출을 끝낸 뒤 새 링크를 만듭니다.</p>
-    </div>
-    <div class="roles">
-      <article class="card">
-        <span class="k">HOST</span><h3>송출자</h3>
-        <ol class="steps">
-          <li><b>입력 소스 선택</b><span>USB 캡처보드 또는 화면 공유를 고르고 장치나 창을 연결합니다.</span></li>
-          <li><b>링크 만들고 복사</b><span>미리보기를 확인한 뒤 링크와 참가 코드를 공유합니다.</span></li>
-          <li><b>송출 종료</b><span>버튼을 누르거나 브라우저에서 화면 공유를 중지하면 끝납니다.</span></li>
-        </ol>
-      </article>
-      <article class="card">
-        <span class="k">VIEWER</span><h3>참가자</h3>
-        <ol class="steps">
-          <li><b>링크 열기 또는 코드 입력</b><span>모바일 브라우저에서도 시청할 수 있습니다.</span></li>
-          <li><b>음량 · 전체화면 · PiP</b><span>포인터 버튼으로 레이저 모드를 켜고 끕니다.</span></li>
-          <li><b>통화 시작</b><span>대화하려면 각자 통화 시작을 누릅니다.</span></li>
-        </ol>
-      </article>
-    </div>
-  </section>
-
-  <section class="section shell" id="features">
-    <div class="section-head">
-      <div><span class="num mono">03 · 주요 기능</span><h2>작은 방송에 필요한 것만,<br>대신 꼼꼼하게</h2></div>
-      <p>화질·전체화면·재접속처럼 실제로 써 보며 불편했던 부분을 하나씩 다듬었습니다.</p>
-    </div>
-    <div class="cards">
-      <article class="card"><span class="k">QUALITY</span><h3>최대 1080p 60fps 송출</h3><p>입력에는 최대 4K 60fps를 요청해 미리보기는 원본 해상도를 유지하고, 인코더에만 축소 비율과 60fps 상한을 적용해 원본 비율 그대로 1080p 안에 맞춥니다.</p></article>
-      <article class="card"><span class="k">LASER</span><h3>레이저 모드</h3><p>클릭·터치 드래그로 포인터를 공유합니다. 송출자는 전체화면에서도 참가자가 보낸 포인터를 항상 볼 수 있습니다.</p></article>
-      <article class="card"><span class="k">FULLSCREEN</span><h3>브라우저별 전체화면</h3><p>기본은 실제 브라우저 전체화면, 모바일 Safari는 네이티브 영상 전체화면을 쓰고, 지원하지 않으면 화면 영역을 채우는 방식으로 전환합니다.</p></article>
-      <article class="card"><span class="k">RECOVERY</span><h3>연결 복구</h3><p>참가자별 연결 복구와 WebSocket 재접속을 지원합니다. 영상 트랙이 활성화되지 않으면 연결을 다시 맺습니다.</p></article>
-    </div>
-  </section>
-
-  <section class="section shell" id="architecture">
-    <div class="section-head">
-      <div><span class="num mono">04 · 연결 구조</span><h2>영상은 서버를 거치지 않고<br>사용자끼리 직접</h2></div>
-      <p>영상·입력 소리·통화 음성은 WebRTC P2P로 전달됩니다. Cloudflare Durable Object는 방 입장과 연결 신호만 관리하며 영상을 저장하거나 중계하지 않습니다.</p>
-    </div>
-    <div class="split">
-      <div class="diagram">
-        <svg viewBox="0 0 520 330" role="img" aria-label="송출자에서 참가자들로 WebRTC 영상이 가고, 모두가 서로 음성으로 연결되며, Durable Object와는 WebSocket 신호만 주고받는 구조">
-          <rect class="box" x="170" y="12" width="180" height="54" rx="12"/>
-          <text x="260" y="36" text-anchor="middle">Durable Object</text>
-          <text class="sub" x="260" y="54" text-anchor="middle">WebSocket 시그널링</text>
-          <path class="signal" d="M260 66 V120"/>
-          <path class="signal" d="M200 66 L70 228"/><path class="signal" d="M230 66 L180 228"/><path class="signal" d="M290 66 L340 228"/><path class="signal" d="M320 66 L450 228"/>
-          <rect class="box host" x="190" y="120" width="140" height="54" rx="12"/>
-          <text x="260" y="144" text-anchor="middle">송출자</text>
-          <text class="sub" x="260" y="162" text-anchor="middle">캡처보드 · 화면 공유</text>
-          <path class="media" d="M230 174 L70 228"/><path class="media" d="M248 174 L180 228"/><path class="media" d="M272 174 L340 228"/><path class="media" d="M290 174 L450 228"/>
-          <g>
-            <rect class="box" x="20" y="228" width="100" height="46" rx="10"/><text x="70" y="256" text-anchor="middle">참가자 1</text>
-            <rect class="box" x="130" y="228" width="100" height="46" rx="10"/><text x="180" y="256" text-anchor="middle">참가자 2</text>
-            <rect class="box" x="290" y="228" width="100" height="46" rx="10"/><text x="340" y="256" text-anchor="middle">참가자 3</text>
-            <rect class="box" x="400" y="228" width="100" height="46" rx="10"/><text x="450" y="256" text-anchor="middle">… 최대 5</text>
-          </g>
-          <path class="voice" d="M70 274 Q125 310 180 274"/><path class="voice" d="M180 274 Q260 318 340 274"/><path class="voice" d="M340 274 Q395 310 450 274"/><path class="voice" d="M70 274 Q260 340 450 274"/>
-        </svg>
-        <div class="legend"><span><i></i>WebRTC 영상·입력 소리</span><span><i class="v"></i>WebRTC 통화 음성</span><span><i class="s"></i>WebSocket 연결 신호</span></div>
-      </div>
-      <div class="prose">
-        <p><strong>시그널링.</strong> 방 이름마다 Durable Object 하나가 WebSocket으로 방 입장과 WebRTC 연결 신호를 주고받게 합니다. 영상 데이터는 서버에 남지 않습니다.</p>
-        <p><strong>트랙 처리.</strong> 수신 트랙이 오디오와 비디오 순서로 따로 도착해도 새 스트림을 화면에 반영하고, 브라우저 자동 재생이 막히면 재생 버튼으로 다시 시도할 수 있게 했습니다.</p>
-        <p><strong>현재 제한.</strong> ICE 설정은 STUN만 사용하고 TURN 중계 서버는 사용하지 않습니다. 통신사망이나 공유기의 NAT·방화벽이 직접 연결을 막으면 접속에 실패할 수 있어, 안정적인 셀룰러 접속에는 TURN 설정이 필요합니다. 녹화와 다시보기 기능은 없습니다.</p>
-        <ul class="tags" style="margin-top:20px" aria-label="사용 기술">
-          <li>TypeScript</li><li>React 19</li><li>Vinext</li><li>WebRTC</li><li>Cloudflare Workers</li><li>Durable Objects</li><li>Tailwind CSS</li>
-        </ul>
+  <section class="section" id="how">
+    <div class="section-head"><h2>사용 방법</h2></div>
+    <div class="section-body">
+      <p class="intro">친구 몇 명에게 게임 화면을 보여 주고 싶을 때, 설치 없이 브라우저에서 링크만 열면 되는 가벼운 방송을 목표로 만들었습니다.</p>
+      <figure>
+        <img class="frame" src="assets/viewer.jpg" alt="Linkcast 참가자 화면: 송출 영상 위에 레이저 모드로 그린 빨간 포인터 선, 상단에 LIVE와 음량·전체화면·나가기 버튼" width="1600" height="1011" loading="lazy">
+        <figcaption>참가자 화면. 레이저 모드를 켜고 드래그하면 빨간 포인터가 송출자에게도 그대로 보입니다. 상단에서 음량, PiP, 전체화면을 조절합니다.</figcaption>
+      </figure>
+      <div class="roles">
+        <div>
+          <h3>송출자</h3>
+          <ol class="steps">
+            <li><b>입력 소스 선택</b><span>USB 캡처보드 또는 화면 공유(프로그램 창·전체 화면·탭)를 고릅니다.</span></li>
+            <li><b>링크 만들고 복사</b><span>미리보기를 확인한 뒤 링크나 참가 코드를 공유합니다.</span></li>
+            <li><b>송출 종료</b><span>버튼을 누르거나 브라우저에서 화면 공유를 멈추면 끝납니다.</span></li>
+          </ol>
+        </div>
+        <div>
+          <h3>참가자</h3>
+          <ol class="steps">
+            <li><b>링크 열기 또는 코드 입력</b><span>모바일 브라우저에서도 시청할 수 있습니다.</span></li>
+            <li><b>음량 · 전체화면 · PiP</b><span>포인터 버튼으로 레이저 모드를 켜고 끕니다.</span></li>
+            <li><b>통화 시작</b><span>대화하려면 각자 통화 시작을 눌러 마이크를 켭니다.</span></li>
+          </ol>
+        </div>
       </div>
     </div>
   </section>
 
-  <section class="closing shell">
+  <section class="section" id="features">
+    <div class="section-head"><h2>주요 기능</h2></div>
+    <div class="section-body">
+      <div class="items">
+        <div class="item"><h4>최대 1080p 60fps 송출</h4><p>입력에는 최대 4K 60fps를 요청해 미리보기는 원본 해상도를 유지하고, WebRTC 인코더에만 축소 비율과 60fps 상한을 걸어 원본 비율 그대로 1080p 안에 맞춥니다.</p></div>
+        <div class="item"><h4>레이저 모드</h4><p>클릭·터치 드래그로 포인터를 공유합니다. 송출자는 전체화면에서도 참가자가 보낸 포인터를 항상 볼 수 있습니다.</p></div>
+        <div class="item"><h4>모두가 함께하는 음성 통화</h4><p>송출자와 참가자뿐 아니라 참가자끼리도 음성으로 연결됩니다. 영상과 별개로 각자 통화에 참여합니다.</p></div>
+        <div class="item"><h4>브라우저별 전체화면</h4><p>기본은 브라우저 전체화면, 모바일 Safari는 네이티브 영상 전체화면을 쓰고, 지원하지 않으면 화면 영역을 채우는 방식으로 바꿉니다.</p></div>
+        <div class="item"><h4>연결 복구</h4><p>참가자별 연결 복구와 WebSocket 재접속을 지원하고, 영상 트랙이 활성화되지 않으면 연결을 다시 맺습니다.</p></div>
+        <div class="item"><h4>설정 기억</h4><p>선택한 입력 장치와 음량 설정을 저장해 다음 송출 때 다시 고르지 않아도 됩니다.</p></div>
+      </div>
+    </div>
+  </section>
+
+  <section class="section" id="architecture">
+    <div class="section-head"><h2>연결 구조</h2></div>
+    <div class="section-body">
+      <p class="intro">영상·입력 소리·통화 음성은 서버를 거치지 않고 WebRTC P2P로 사용자끼리 직접 전달됩니다. Cloudflare Durable Object는 방 입장과 연결 신호만 관리하며 영상을 저장하거나 중계하지 않습니다.</p>
+      <div class="split">
+        <div class="diagram">
+          <svg viewBox="0 0 520 330" role="img" aria-label="송출자에서 참가자들로 WebRTC 영상이 가고, 모두가 서로 음성으로 연결되며, Durable Object와는 WebSocket 신호만 주고받는 구조">
+            <rect class="box" x="170" y="12" width="180" height="54" rx="8"/>
+            <text x="260" y="36" text-anchor="middle">Durable Object</text>
+            <text class="sub" x="260" y="54" text-anchor="middle">WebSocket 시그널링</text>
+            <path class="signal" d="M260 66 V120"/>
+            <path class="signal" d="M200 66 L70 228"/><path class="signal" d="M230 66 L180 228"/><path class="signal" d="M290 66 L340 228"/><path class="signal" d="M320 66 L450 228"/>
+            <rect class="box host" x="190" y="120" width="140" height="54" rx="8"/>
+            <text x="260" y="144" text-anchor="middle">송출자</text>
+            <text class="sub" x="260" y="162" text-anchor="middle">캡처보드 · 화면 공유</text>
+            <path class="media" d="M230 174 L70 228"/><path class="media" d="M248 174 L180 228"/><path class="media" d="M272 174 L340 228"/><path class="media" d="M290 174 L450 228"/>
+            <rect class="box" x="20" y="228" width="100" height="46" rx="8"/><text x="70" y="256" text-anchor="middle">참가자 1</text>
+            <rect class="box" x="130" y="228" width="100" height="46" rx="8"/><text x="180" y="256" text-anchor="middle">참가자 2</text>
+            <rect class="box" x="290" y="228" width="100" height="46" rx="8"/><text x="340" y="256" text-anchor="middle">참가자 3</text>
+            <rect class="box" x="400" y="228" width="100" height="46" rx="8"/><text x="450" y="256" text-anchor="middle">… 최대 5</text>
+            <path class="voice" d="M70 274 Q125 310 180 274"/><path class="voice" d="M180 274 Q260 318 340 274"/><path class="voice" d="M340 274 Q395 310 450 274"/><path class="voice" d="M70 274 Q260 340 450 274"/>
+          </svg>
+          <div class="legend"><span><i></i>WebRTC 영상·입력 소리</span><span><i class="v"></i>WebRTC 통화 음성</span><span><i class="s"></i>WebSocket 연결 신호</span></div>
+        </div>
+        <div>
+          <p><strong>시그널링.</strong> 방 이름마다 Durable Object 하나가 WebSocket으로 방 입장과 WebRTC 연결 신호를 주고받게 합니다. 영상 데이터는 서버에 남지 않습니다.</p>
+          <p><strong>트랙 처리.</strong> 수신 트랙이 오디오와 비디오 순서로 따로 도착해도 새 스트림을 화면에 반영하고, 브라우저 자동 재생이 막히면 재생 버튼으로 다시 시도할 수 있게 했습니다.</p>
+          <p><strong>현재 제한.</strong> ICE 설정은 STUN만 사용하고 TURN 중계 서버는 쓰지 않습니다. 통신사망이나 공유기의 NAT·방화벽이 직접 연결을 막으면 접속에 실패할 수 있어, 안정적인 셀룰러 접속에는 TURN 설정이 필요합니다. 녹화와 다시보기 기능은 없습니다.</p>
+        </div>
+      </div>
+      <ul class="tags" aria-label="사용 기술"><li>TypeScript</li><li>React 19</li><li>Vinext</li><li>WebRTC</li><li>Cloudflare Workers</li><li>Durable Objects</li><li>Tailwind CSS</li></ul>
+    </div>
+  </section>
+
+  <section class="closing">
     <h2>지금 바로 링크를 만들어 보세요</h2>
     <p>데스크톱 브라우저에서 송출하고, 모바일에서도 시청할 수 있습니다.</p>
     <div class="actions">
-      <a class="btn primary" href="https://linkcast.byeonghyeon383.workers.dev/">서비스 열기 ↗</a>
-      <a class="btn" href="https://github.com/BIYONGHIYON/linkcast">GitHub ↗</a>
+      <a class="btn primary" href="https://linkcast.byeonghyeon383.workers.dev/">서비스 열기</a>
+      <a class="btn" href="https://github.com/BIYONGHIYON/linkcast">GitHub</a>
       <a class="btn" href="https://biyonghiyon.github.io/portfolio/">포트폴리오로 돌아가기</a>
     </div>
   </section>
 </main>
 
-<footer class="footer">© 2026 Linkcast · <a href="https://github.com/BIYONGHIYON">BIYONGHIYON</a><br>Nintendo 및 Nintendo Switch는 Nintendo의 상표입니다. Linkcast는 Nintendo와 제휴하거나 공식 승인을 받은 서비스가 아닙니다.</footer>
+<footer class="footer"><div class="shell">© 2026 Linkcast · <a href="https://github.com/BIYONGHIYON">BIYONGHIYON</a><br>Nintendo 및 Nintendo Switch는 Nintendo의 상표입니다. Linkcast는 Nintendo와 제휴하거나 공식 승인을 받은 서비스가 아닙니다.</div></footer>
 </body>
 </html>
